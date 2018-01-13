@@ -19,17 +19,20 @@ from tensorflow.python.client import timeline
 
 from wavenet import WaveNetModel, AudioReader, optimizer_factory
 
-BATCH_SIZE = 1
-DATA_DIRECTORY = './VCTK-Corpus'
+from gpu import define_gpu
+define_gpu(2)
+
+BATCH_SIZE = 2 #1
+DATA_DIRECTORY = './VCTK-Corpus/wav48/p225'
 LOGDIR_ROOT = './logdir'
 CHECKPOINT_EVERY = 50
 NUM_STEPS = int(1e5)
 LEARNING_RATE = 1e-3
 WAVENET_PARAMS = './wavenet_params.json'
 STARTED_DATESTRING = "{0:%Y-%m-%dT%H-%M-%S}".format(datetime.now())
-SAMPLE_SIZE = 100000
+SAMPLE_SIZE = 80000 #100k
 L2_REGULARIZATION_STRENGTH = 0
-SILENCE_THRESHOLD = 0.3
+SILENCE_THRESHOLD = 0#0.3
 EPSILON = 0.001
 MOMENTUM = 0.9
 MAX_TO_KEEP = 5
@@ -96,7 +99,7 @@ def get_arguments():
                         default=MOMENTUM, help='Specify the momentum to be '
                         'used by sgd or rmsprop optimizer. Ignored by the '
                         'adam optimizer. Default: ' + str(MOMENTUM) + '.')
-    parser.add_argument('--histograms', type=_str_to_bool, default=False,
+    parser.add_argument('--histograms', type=_str_to_bool, default=True,
                         help='Whether to store histogram summaries. Default: False')
     parser.add_argument('--gc_channels', type=int, default=None,
                         help='Number of global condition channels. Default: None. Expecting: Int')
@@ -203,6 +206,7 @@ def main():
     is_overwritten_training = logdir != restore_from
 
     with open(args.wavenet_params, 'r') as f:
+        print(f)
         wavenet_params = json.load(f)
 
     # Create coordinator.

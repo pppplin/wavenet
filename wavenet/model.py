@@ -42,7 +42,6 @@ class WaveNetModel(object):
                            skip_channels)
         loss = net.loss(input_batch)
     '''
-
     def __init__(self,
                  batch_size,
                  dilations,
@@ -139,6 +138,7 @@ class WaveNetModel(object):
                 # given to us and we don't need to do the embedding lookup.
                 # Still another alternative is no global condition at all, in
                 # which case we also don't do a tf.nn.embedding_lookup.
+                #CONDITION!
                 with tf.variable_scope('embeddings'):
                     layer = dict()
                     layer['gc_embedding'] = create_embedding_table(
@@ -320,15 +320,15 @@ class WaveNetModel(object):
 
         if self.histograms:
             layer = 'layer{}'.format(layer_index)
-            tf.histogram_summary(layer + '_filter', weights_filter)
-            tf.histogram_summary(layer + '_gate', weights_gate)
-            tf.histogram_summary(layer + '_dense', weights_dense)
-            tf.histogram_summary(layer + '_skip', weights_skip)
+            tf.summary.histogram(layer + '_filter', weights_filter)
+            tf.summary.histogram(layer + '_gate', weights_gate)
+            tf.summary.histogram(layer + '_dense', weights_dense)
+            tf.summary.histogram(layer + '_skip', weights_skip)
             if self.use_biases:
-                tf.histogram_summary(layer + '_biases_filter', filter_bias)
-                tf.histogram_summary(layer + '_biases_gate', gate_bias)
-                tf.histogram_summary(layer + '_biases_dense', dense_bias)
-                tf.histogram_summary(layer + '_biases_skip', skip_bias)
+                tf.summary.histogram(layer + '_biases_filter', filter_bias)
+                tf.summary.histogram(layer + '_biases_gate', gate_bias)
+                tf.summary.histogram(layer + '_biases_dense', dense_bias)
+                tf.summary.histogram(layer + '_biases_skip', skip_bias)
 
         input_cut = tf.shape(input_batch)[1] - tf.shape(transformed)[1]
         input_batch = tf.slice(input_batch, [0, input_cut, 0], [-1, -1, -1])
@@ -398,10 +398,10 @@ class WaveNetModel(object):
         current_layer = input_batch
 
         # Pre-process the input with a regular convolution
-        if self.scalar_input:
-            initial_channels = 1
-        else:
-            initial_channels = self.quantization_channels
+        #if self.scalar_input:
+            #initial_channels = 1
+        #else:
+            #initial_channels = self.quantization_channels
 
         current_layer = self._create_causal_layer(current_layer)
 
@@ -426,11 +426,11 @@ class WaveNetModel(object):
                 b2 = self.variables['postprocessing']['postprocess2_bias']
 
             if self.histograms:
-                tf.histogram_summary('postprocess1_weights', w1)
-                tf.histogram_summary('postprocess2_weights', w2)
+                tf.summary.histogram('postprocess1_weights', w1)
+                tf.summary.histogram('postprocess2_weights', w2)
                 if self.use_biases:
-                    tf.histogram_summary('postprocess1_biases', b1)
-                    tf.histogram_summary('postprocess2_biases', b2)
+                    tf.summary.histogram('postprocess1_biases', b1)
+                    tf.summary.histogram('postprocess2_biases', b2)
 
             # We skip connections from the outputs of each layer, adding them
             # all up here.
@@ -608,6 +608,7 @@ class WaveNetModel(object):
         with tf.name_scope(name):
             encoded = tf.one_hot(waveform, self.quantization_channels)
             encoded = tf.reshape(encoded, [-1, self.quantization_channels])
+            #TODO
             gc_embedding = self._embed_gc(global_condition)
             raw_output = self._create_generator(encoded, gc_embedding)
             out = tf.reshape(raw_output, [-1, self.quantization_channels])

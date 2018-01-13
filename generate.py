@@ -12,12 +12,15 @@ import tensorflow as tf
 
 from wavenet import WaveNetModel, mu_law_decode, mu_law_encode, audio_reader
 
+from gpu import define_gpu
+define_gpu(2)
+
 SAMPLES = 16000
 TEMPERATURE = 1.0
-LOGDIR = './logdir'
+LOGDIR = './logdir/train/2017-11-03T10-40-54/model.ckpt-1400'
 WAVENET_PARAMS = './wavenet_params.json'
 SAVE_EVERY = None
-SILENCE_THRESHOLD = 0.1
+SILENCE_THRESHOLD = 0 #0.1
 
 
 def get_arguments():
@@ -175,7 +178,6 @@ def main():
     saver.restore(sess, args.checkpoint)
 
     decode = mu_law_decode(samples, wavenet_params['quantization_channels'])
-
     quantization_channels = wavenet_params['quantization_channels']
     if args.wav_seed:
         seed = create_seed(args.wav_seed,
