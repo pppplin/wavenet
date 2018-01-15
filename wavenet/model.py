@@ -110,7 +110,7 @@ class WaveNetModel(object):
         self.global_condition_cardinality = global_condition_cardinality
 
         #TEST
-        self.local_condition_channels = _
+        self.local_condition_channels = local_condition_channels
         self.receptive_field = WaveNetModel.calculate_receptive_field(
             self.filter_width, self.dilations, self.scalar_input,
             self.initial_filter_width)
@@ -641,14 +641,17 @@ class WaveNetModel(object):
         Returns embedding for local condition.
         exactly deconv [bs, t0, input_local_channel] to [bs, local_output_width, self.local_condition_channels]
         '''
-        embedding = tf.expand_dims(local_condition, 2)
-        out_shape = [tf.shape(local_condition)[0], local_output_width, 1 , self.local_condition_channels]
+        embedding = local_condition
+        if embedding is not None:
+            embedding = tf.expand_dims(local_condition, 2)
+            out_shape = [tf.shape(local_condition)[0], local_output_width, 1 , self.local_condition_channels]
         #deconv filter
         #TEST
-        local_w = create_variable('local_embedding_filter', [tf.shape(local_condition)[1], 1,
+            local_w = create_variable('local_embedding_filter', [tf.shape(local_condition)[1], 1,
                                                             self.local_input_channels, tf.shape(local_condition)[-1]])
-        embedding = tf.nn.conv2d_transpose(embedding, local_w, output_shape = tf.pack(out_shape), stride = [1, 1, 1, 1], padding='VALID')
-        embedding = tf.squeeze(embedding)
+            embedding = tf.nn.conv2d_transpose(embedding, local_w, output_shape = tf.pack(out_shape), stride = [1, 1, 1, 1], padding='VALID')
+            embedding = tf.squeeze(embedding)
+
         return embedding
 
     #TODO
@@ -659,6 +662,8 @@ class WaveNetModel(object):
         as an input, see predict_proba_incremental for a faster alternative.'''
 
         with tf.name_scope(name):
+            #TODO
+            width = tf.shape(waveform)[1]
             if self.scalar_input:
                 encoded = tf.cast(waveform, tf.float32)
                 encoded = tf.reshape(encoded, [-1, 1])
@@ -668,7 +673,7 @@ class WaveNetModel(object):
             gc_embedding = self._embed_gc(global_condition)
 
             #TODO encoded??????
-            lc_embedding = self._embed_lc(local_condition, tf.shape(encoded)[1])
+            lc_embedding = self._embed_lc(local_condition, width)
 
             raw_output = self._create_network(encoded, gc_embedding, lc_embedding)
             out = tf.reshape(raw_output, [-1, self.quantization_channels])
@@ -696,10 +701,11 @@ class WaveNetModel(object):
 
         with tf.name_scope(name):
             encoded = tf.one_hot(waveform, self.quantization_channels)
+            width = tf.shape(encoded)[1]
             encoded = tf.reshape(encoded, [-1, self.quantization_channels])
             #TODO
             gc_embedding = self._embed_gc(global_condition)
-            lc_embedding = self._embed_lc(local_condition, tf.shape(encoded)[1])
+            lc_embedding = self._embed_lc(local_condition, width)
 
             raw_output = self._create_generator(encoded, gc_embedding, lc_embedding)
             out = tf.reshape(raw_output, [-1, self.quantization_channels])
@@ -727,11 +733,11 @@ class WaveNetModel(object):
                                           self.quantization_channels)
 
             #TODO
-            #if global_condition_batch is not None:
             gc_embedding = self._embed_gc(global_condition_batch)
 
-            if local_condition_batch is not None:
-                lc_embedding = self._embed_lc(local_condition_batch)
+            width = tf.shape(encoded_input)[1]
+
+            lc_embedding = self._embed_lc(local_condition_batch, width)
 
             encoded = self._one_hot(encoded_input)
             if self.scalar_input:
@@ -747,10 +753,7 @@ class WaveNetModel(object):
                                      [-1, network_input_width, -1])
 
             #TODO
-            if global_condition_batch is not None:
-                raw_output = self._create_network(network_input, gc_embedding)
-            elif local_condition_batch is not None:
-                raw_output = self._create_network(network_input, lc_embedding)
+            raw_output = self._create_network(network_input, gc_embedding, lc_embedding)
 
             with tf.name_scope('loss'):
                 # Cut off the samples corresponding to the receptive field

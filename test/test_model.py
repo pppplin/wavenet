@@ -391,6 +391,32 @@ class TestNetWithGlobalConditioning(TestNet):
                                 global_condition_channels=NUM_SPEAKERS,
                                 global_condition_cardinality=NUM_SPEAKERS)
 
+#TODO
+class TestNetWithLocalConditioning(TestNet):
+    def setUp(self):
+        print('TestNetWithLocalConditioning setup.')
+        sys.stdout.flush()
+
+        self.optimizer_type = 'sgd'
+        self.learning_rate = 0.01
+        self.generate = True
+        self.momentum = MOMENTUM
+        self.global_conditioning = True
+        self.train_iters = 1000
+        self.net = WaveNetModel(batch_size=NUM_SPEAKERS,
+                                dilations=[1, 2, 4, 8, 16, 32, 64,
+                                           1, 2, 4, 8, 16, 32, 64],
+                                filter_width=2,
+                                residual_channels=32,
+                                dilation_channels=32,
+                                quantization_channels=QUANTIZATION_CHANNELS,
+                                use_biases=True,
+                                skip_channels=256,
+                                global_condition_channels=NUM_SPEAKERS,
+                                global_condition_cardinality=NUM_SPEAKERS,
+                                local_condition_channels=32)
+
+
 
 if __name__ == '__main__':
     tf.test.main()
