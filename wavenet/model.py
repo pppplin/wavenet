@@ -56,6 +56,7 @@ class WaveNetModel(object):
                  histograms=False,
                  global_condition_channels=None,
                  global_condition_cardinality=None,
+                 local_input_channels=None,
                  local_condition_channels=None):
         '''Initializes the WaveNet model.
 
@@ -111,6 +112,8 @@ class WaveNetModel(object):
 
         #TEST
         self.local_condition_channels = local_condition_channels
+        self.local_input_channels = local_input_channels
+
         self.receptive_field = WaveNetModel.calculate_receptive_field(
             self.filter_width, self.dilations, self.scalar_input,
             self.initial_filter_width)
@@ -141,14 +144,19 @@ class WaveNetModel(object):
                 # given to us and we don't need to do the embedding lookup.
                 # Still another alternative is no global condition at all, in
                 # which case we also don't do a tf.nn.embedding_lookup.
-                #CONDITION!
                 with tf.variable_scope('embeddings'):
                     layer = dict()
                     layer['gc_embedding'] = create_embedding_table(
                         'gc_embedding',
                         [self.global_condition_cardinality,
                          self.global_condition_channels])
-                    var['embeddings'] = layer
+
+
+            #TODO and height depend on midi and wav ratio
+            if self.local_condition_channels is not None:
+                with tf.variable_scope('local_embeddings'):
+                    var['embeddings']['lc_embedding'] = create_variable('lc_embedding_filter',
+                                                                        [1, 1, self.local_condition_channels, self.local_input_channels])
 
             with tf.variable_scope('causal_layer'):
                 layer = dict()
@@ -644,12 +652,9 @@ class WaveNetModel(object):
         embedding = local_condition
         if embedding is not None:
             embedding = tf.expand_dims(local_condition, 2)
-            out_shape = [tf.shape(local_condition)[0], local_output_width, 1 , self.local_condition_channels]
-        #deconv filter
-        #TEST
-            local_w = create_variable('local_embedding_filter', [tf.shape(local_condition)[1], 1,
-                                                            self.local_input_channels, tf.shape(local_condition)[-1]])
-            embedding = tf.nn.conv2d_transpose(embedding, local_w, output_shape = tf.pack(out_shape), stride = [1, 1, 1, 1], padding='VALID')
+            out_shape = [self.batch_size, local_output_width, 1 , self.local_condition_channels]
+            local_w = self.variables['embeddings']['lc_embedding']
+            embedding = tf.nn.conv2d_transpose(embedding, local_w, output_shape = tf.stack(out_shape), strides = [1, 1, 1, 1], padding='SAME')
             embedding = tf.squeeze(embedding)
 
         return embedding
@@ -661,6 +666,7 @@ class WaveNetModel(object):
         If you want to generate audio by feeding the output of the network back
         as an input, see predict_proba_incremental for a faster alternative.'''
 
+        '''GENERATION'''
         with tf.name_scope(name):
             #TODO
             width = tf.shape(waveform)[1]
@@ -692,6 +698,7 @@ class WaveNetModel(object):
         '''Computes the probability distribution of the next sample
         incrementally, based on a single sample and all previously passed
         samples.'''
+        '''GENERATION'''
         if self.filter_width > 2:
             raise NotImplementedError("Incremental generation does not "
                                       "support filter_width > 2.")
@@ -731,15 +738,14 @@ class WaveNetModel(object):
             # We mu-law encode and quantize the input audioform.
             encoded_input = mu_law_encode(input_batch,
                                           self.quantization_channels)
-
-            #TODO
             gc_embedding = self._embed_gc(global_condition_batch)
 
-            width = tf.shape(encoded_input)[1]
-
-            lc_embedding = self._embed_lc(local_condition_batch, width)
-
             encoded = self._one_hot(encoded_input)
+
+            #TODO NOT SURE THOUGH: depends on input shape of lc_embed
+            if local_condition_batch is not None:
+                local_condition_batch = self._one_hot(local_condition_batch)
+
             if self.scalar_input:
                 network_input = tf.reshape(
                     tf.cast(input_batch, tf.float32),
@@ -753,6 +759,7 @@ class WaveNetModel(object):
                                      [-1, network_input_width, -1])
 
             #TODO
+            lc_embedding = self._embed_lc(local_condition_batch, network_input_width)
             raw_output = self._create_network(network_input, gc_embedding, lc_embedding)
 
             with tf.name_scope('loss'):
