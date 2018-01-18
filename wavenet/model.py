@@ -150,13 +150,17 @@ class WaveNetModel(object):
                         'gc_embedding',
                         [self.global_condition_cardinality,
                          self.global_condition_channels])
+                    var['embeddings'] = layer
 
 
             #TODO and height depend on midi and wav ratio
             if self.local_condition_channels is not None:
                 with tf.variable_scope('local_embeddings'):
-                    var['embeddings']['lc_embedding'] = create_variable('lc_embedding_filter',
-                                                                        [1, 1, self.local_condition_channels, self.local_input_channels])
+                    layer = dict()
+                    layer['filter'] = create_variable(
+                            'lc_embedding_filter',
+                            [1, 1, self.local_condition_channels, self.local_input_channels])
+                    var['lc_embedding'] = layer
 
             with tf.variable_scope('causal_layer'):
                 layer = dict()
@@ -652,8 +656,9 @@ class WaveNetModel(object):
         embedding = local_condition
         if embedding is not None:
             embedding = tf.expand_dims(local_condition, 2)
-            out_shape = [self.batch_size, local_output_width, 1 , self.local_condition_channels]
-            local_w = self.variables['embeddings']['lc_embedding']
+            #TODO local_output_width CHEATING
+            out_shape = [self.batch_size, local_output_width+1, 1 , self.local_condition_channels]
+            local_w = self.variables['lc_embedding']['filter']
             embedding = tf.nn.conv2d_transpose(embedding, local_w, output_shape = tf.stack(out_shape), strides = [1, 1, 1, 1], padding='SAME')
             embedding = tf.squeeze(embedding)
 

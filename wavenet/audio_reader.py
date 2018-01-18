@@ -7,6 +7,7 @@ import threading
 import librosa
 import numpy as np
 import tensorflow as tf
+import madmom
 
 FILE_PATTERN = r'p([0-9]+)_([0-9]+)\.wav'
 
@@ -41,6 +42,7 @@ def find_files(directory, pattern='*.wav'):
     return files
 
 
+#TODO add midi
 def load_generic_audio(directory, sample_rate):
     '''Generator that yields audio waveforms from the directory.'''
     files = find_files(directory)
@@ -58,7 +60,9 @@ def load_generic_audio(directory, sample_rate):
             category_id = int(ids[0][0])
         audio, _ = librosa.load(filename, sr=sample_rate, mono=True)
         audio = audio.reshape(-1, 1)
-        yield audio, filename, category_id
+        midiname = filename.replace('mid', 'mid')
+        midi = madmom.utils.midi.process_notes(midiname)
+        yield audio, midi, filename, category_id
 
 
 def trim_silence(audio, threshold, frame_length=2048):
@@ -93,6 +97,7 @@ class AudioReader(object):
                  coord,
                  sample_rate,
                  gc_enabled,
+                 lc_enabled, #TODO
                  receptive_field,
                  sample_size=None,
                  silence_threshold=None,
@@ -104,8 +109,12 @@ class AudioReader(object):
         self.receptive_field = receptive_field
         self.silence_threshold = silence_threshold
         self.gc_enabled = gc_enabled
+        #TODO
+        self.lc_enabled = lc_enabled
         self.threads = []
         self.sample_placeholder = tf.placeholder(dtype=tf.float32, shape=None)
+        #TODO
+        self.midisample_placeholder = tf.placeholder(dtype=tf.float32, shape=None)
         self.queue = tf.PaddingFIFOQueue(queue_size,
                                          ['float32'],
                                          shapes=[(None, 1)])
@@ -117,6 +126,12 @@ class AudioReader(object):
                                                 shapes=[()])
             self.gc_enqueue = self.gc_queue.enqueue([self.id_placeholder])
 
+        #TODO
+        if self.lc_enabled:
+            self.lc_queue = tf.PaddingFIFOQueue(queue_size,
+                                                ['float32'],
+                                                shapes=[(None, 5)])
+            self.lc_enqueue = self.lc_queue.enqueue([self.midisample_placeholder])
         # TODO Find a better way to check this.
         # Checking inside the AudioReader's thread makes it hard to terminate
         # the execution of the script, so we do it in the constructor for now.
@@ -150,12 +165,17 @@ class AudioReader(object):
     def dequeue_gc(self, num_elements):
         return self.gc_queue.dequeue_many(num_elements)
 
+    #TODO
+    def dequeue_lc(self, num_elements):
+        return self.lc_queue.dequeue_many(num_elements)
+
     def thread_main(self, sess):
         stop = False
         # Go through the dataset multiple times
         while not stop:
             iterator = load_generic_audio(self.audio_dir, self.sample_rate)
-            for audio, filename, category_id in iterator:
+            #TODO
+            for audio, midi, filename, category_id in iterator:
                 if self.coord.should_stop():
                     stop = True
                     break
@@ -169,18 +189,32 @@ class AudioReader(object):
                               "threshold, or adjust volume of the audio."
                               .format(filename))
 
+                audio_length = audio.shape[0]
                 audio = np.pad(audio, [[self.receptive_field, 0], [0, 0]],
                                'constant')
+                #TODO pad midi
+                pad_scale = int(self.receptive_field*midi.shape[0]/audio_length)
+                midi = np.pad(midi, [[pad_scale, 0], [0,0]], 'constant')
 
                 if self.sample_size:
                     # Cut samples into pieces of size receptive_field +
                     # sample_size with receptive_field overlap
                     while len(audio) > self.receptive_field:
+                        audio_length = audio.shape[0]
+                        cut_scale = int(midi.shape[0]*(self.receptive_field+self.sample_size)/audio_length)
                         piece = audio[:(self.receptive_field +
                                         self.sample_size), :]
+                        midi_piece = midi[:cut_scale, :]
                         sess.run(self.enqueue,
                                  feed_dict={self.sample_placeholder: piece})
+
+                        #TODO
+                        if self.lc_enabled:
+                            sess.run(self.lc_enqueue,
+                                    feed_dict={self.midisample_placeholder: midi_piece})
                         audio = audio[self.sample_size:, :]
+                        cut_scale = int(midi.shape[0]*self.sample_size/audio_length)
+                        midi = midi[cut_scale:, :]
                         if self.gc_enabled:
                             sess.run(self.gc_enqueue, feed_dict={
                                 self.id_placeholder: category_id})
@@ -190,6 +224,10 @@ class AudioReader(object):
                     if self.gc_enabled:
                         sess.run(self.gc_enqueue,
                                  feed_dict={self.id_placeholder: category_id})
+                    #TODO
+                    if self.lc_enabled:
+                        sess.run(self.lc_enqueue,
+                                feed_dict={self.midisample_placeholder: midi})
 
     def start_threads(self, sess, n_threads=1):
         for _ in range(n_threads):
