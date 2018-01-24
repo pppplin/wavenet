@@ -98,6 +98,16 @@ def get_arguments():
         type=int,
         default=None,
         help='ID of category to generate, if globally conditioned.')
+
+    #TODO
+    parser.add_argument(
+        '--lc_input_channels', type=int,
+        default=None,
+        help='Number of local condition channels. Default: None, Expect: Int.')
+    parser.add_argument(
+        '--lc_channels', type=int, default=None,
+        help='Number of local condition channels. Default: None. Expecting: Int')
+
     arguments = parser.parse_args()
     if arguments.gc_channels is not None:
         if arguments.gc_cardinality is None:
@@ -144,6 +154,7 @@ def main():
 
     sess = tf.Session()
 
+    #TODO
     net = WaveNetModel(
         batch_size=1,
         dilations=wavenet_params['dilations'],

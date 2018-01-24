@@ -57,7 +57,8 @@ class WaveNetModel(object):
                  global_condition_channels=None,
                  global_condition_cardinality=None,
                  local_input_channels=None,
-                 local_condition_channels=None):
+                 local_condition_channels=None,
+                 ratio=None):
         '''Initializes the WaveNet model.
 
         Args:
@@ -110,9 +111,10 @@ class WaveNetModel(object):
         self.global_condition_channels = global_condition_channels
         self.global_condition_cardinality = global_condition_cardinality
 
-        #TEST
+        #TODO
         self.local_condition_channels = local_condition_channels
         self.local_input_channels = local_input_channels
+        self.ratio = ratio
 
         self.receptive_field = WaveNetModel.calculate_receptive_field(
             self.filter_width, self.dilations, self.scalar_input,
@@ -159,8 +161,11 @@ class WaveNetModel(object):
                     layer = dict()
                     layer['filter'] = create_variable(
                             'lc_embedding_filter',
-                            [1, 1, self.local_condition_channels, self.local_input_channels])
+                            [3, 1, self.local_condition_channels, self.local_input_channels])
+                    #TODO
+                    layer['strides'] = [1, self.ratio, 1, 1]
                     var['lc_embedding'] = layer
+
 
             with tf.variable_scope('causal_layer'):
                 layer = dict()
@@ -654,14 +659,20 @@ class WaveNetModel(object):
         exactly deconv [bs, t0, input_local_channel] to [bs, local_output_width, self.local_condition_channels]
         '''
         embedding = local_condition
-        if embedding is not None:
+        if embedding is not None and tf.size(tf.shape(embedding))==3:
             embedding = tf.expand_dims(local_condition, 2)
-            #TODO local_output_width CHEATING
-            out_shape = [self.batch_size, local_output_width+1, 1 , self.local_condition_channels]
-            local_w = self.variables['lc_embedding']['filter']
-            embedding = tf.nn.conv2d_transpose(embedding, local_w, output_shape = tf.stack(out_shape), strides = [1, 1, 1, 1], padding='SAME')
-            embedding = tf.squeeze(embedding)
+            #TODO local_output_width
 
+            local_w = self.variables['lc_embedding']['filter']
+            out_shape = [self.batch_size, local_output_width, 1 , self.local_condition_channels]
+            embedding = tf.nn.conv2d_transpose(embedding, local_w, output_shape = tf.stack(out_shape),
+                                                strides = [1, self.ratio, 1, 1], padding='SAME')
+
+            embedding = tf.squeeze(embedding)
+            #TODO
+            #???
+            #    padding = tf.constant([[0,0], [0,local_output_width-tf.shape(embedding)[1]], [0,0]])
+            #    tf.pad(embedding, padding)
         return embedding
 
     #TODO
@@ -748,8 +759,6 @@ class WaveNetModel(object):
             encoded = self._one_hot(encoded_input)
 
             #TODO NOT SURE THOUGH: depends on input shape of lc_embed
-            if local_condition_batch is not None:
-                local_condition_batch = self._one_hot(local_condition_batch)
 
             if self.scalar_input:
                 network_input = tf.reshape(
@@ -764,6 +773,8 @@ class WaveNetModel(object):
                                      [-1, network_input_width, -1])
 
             #TODO
+            if local_condition_batch is not None:
+                local_condition_batch = tf.to_float(local_condition_batch)
             lc_embedding = self._embed_lc(local_condition_batch, network_input_width)
             raw_output = self._create_network(network_input, gc_embedding, lc_embedding)
 

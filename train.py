@@ -107,8 +107,10 @@ def get_arguments():
                         help='Maximum amount of checkpoints that will be kept alive. Default: '
                              + str(MAX_TO_KEEP) + '.')
     #TODO
-    parser.add_argument('--local_condition', type=_str_to_bool, default=False,
-            help='Whether to enable local condition(midi or notes). Default: False')
+    parser.add_argument('--lc_input_channels', type=int, default=None,
+                        help='Number of local condition input channels. eg 128 for midi. Default: None. Expecting: Int')
+    parser.add_argument('--lc_channels', type=int, default=None,
+                        help='Number of local condition channels. Default: None. Expecting: Int')
     return parser.parse_args()
 
 
@@ -223,14 +225,14 @@ def main():
                                                       EPSILON else None
         gc_enabled = args.gc_channels is not None
         #TODO
-        lc_enabled = args.local_condition
+        #lc_enabled = args.lc_channels is not None
 
         reader = AudioReader(
             args.data_dir,
             coord,
             sample_rate=wavenet_params['sample_rate'],
             gc_enabled=gc_enabled,
-            lc_enabled=lc_enabled, #TODO
+            lc_channels=args.lc_input_channels, #TODO
             receptive_field=WaveNetModel.calculate_receptive_field(wavenet_params["filter_width"],
                                                                    wavenet_params["dilations"],
                                                                    wavenet_params["scalar_input"],
@@ -244,10 +246,13 @@ def main():
             gc_id_batch = None
 
         #TODO
-        if lc_enabled:
+        if args.lc_channels is not None:
             lc_batch = reader.dequeue_lc(args.batch_size)
         else:
             lc_batch = None
+
+        #TODO: ratio
+        ratio = reader.ratio
 
     # Create network.
     net = WaveNetModel(
@@ -263,7 +268,10 @@ def main():
         initial_filter_width=wavenet_params["initial_filter_width"],
         histograms=args.histograms,
         global_condition_channels=args.gc_channels,
-        global_condition_cardinality=reader.gc_category_cardinality)
+        global_condition_cardinality=reader.gc_category_cardinality,
+        local_input_channels=args.lc_input_channels,
+        local_condition_channels=args.lc_channels,
+        ratio = ratio)
 
     if args.l2_regularization_strength == 0:
         args.l2_regularization_strength = None
