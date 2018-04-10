@@ -52,6 +52,7 @@ class WaveNetModel(object):
                  quantization_channels=2**8,
                  use_biases=False,
                  scalar_input=False,
+                 velocity_input=False,
                  initial_filter_width=32,
                  histograms=False,
                  global_condition_channels=None,
@@ -77,6 +78,8 @@ class WaveNetModel(object):
             scalar_input: Whether to use the quantized waveform directly as
                 input to the network instead of one-hot encoding it.
                 Default: False.
+            #TODO
+            velocity_input: Whether to include velocity in input. Default False
             initial_filter_width: The width of the initial filter of the
                 convolution applied to the scalar input. This is only relevant
                 if scalar_input=True.
@@ -103,6 +106,7 @@ class WaveNetModel(object):
         self.use_biases = use_biases
         self.skip_channels = skip_channels
         self.scalar_input = scalar_input
+        self.velocity_input = velocity_input
         self.initial_filter_width = initial_filter_width
         self.histograms = histograms
         self.global_condition_channels = global_condition_channels
@@ -152,6 +156,10 @@ class WaveNetModel(object):
                 if self.scalar_input:
                     initial_channels = 1
                     initial_filter_width = self.initial_filter_width
+                #TODO
+                if self.velocity_input:
+                    initial_channels = 2
+                    initial_filter_width = self.initial_filter_width#TODO
                 else:
                     initial_channels = self.quantization_channels
                     initial_filter_width = self.filter_width
@@ -307,7 +315,12 @@ class WaveNetModel(object):
 
         # The 1x1 conv to produce the skip output
         skip_cut = tf.shape(out)[1] - output_width
-        out_skip = tf.slice(out, [0, skip_cut, 0], [-1, -1, -1])
+        #TODO
+        out_skip_slice = tf.slice(out, [0, tf.abs(skip_cut), 0], [-1, -1, -1])
+        out_skip_pad = tf.image.resize_image_with_crop_or_pad(out, tf.shape(out)[0], output_width)
+        out_skip = tf.cond(tf.less(skip_cut, 0),
+                    lambda: out_skip_pad,
+                    lambda: out_skip_slice)
         weights_skip = variables['skip']
         skip_contribution = tf.nn.conv1d(
             out_skip, weights_skip, stride=1, padding="SAME", name="skip")
@@ -631,8 +644,9 @@ class WaveNetModel(object):
         '''
         with tf.name_scope(name):
             # We mu-law encode and quantize the input audioform.
-            encoded_input = mu_law_encode(input_batch,
-                                          self.quantization_channels)
+            #TODO
+            #encoded_input = input_batch
+            encoded_input = mu_law_encode(input_batch, self.quantization_channels)
 
             gc_embedding = self._embed_gc(global_condition_batch)
             encoded = self._one_hot(encoded_input)

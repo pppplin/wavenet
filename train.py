@@ -106,6 +106,8 @@ def get_arguments():
     parser.add_argument('--max_checkpoints', type=int, default=MAX_TO_KEEP,
                         help='Maximum amount of checkpoints that will be kept alive. Default: '
                              + str(MAX_TO_KEEP) + '.')
+    parser.add_argument('--early_stop', type=bool, default=False, help='Wherther to use validate set to early stop.')
+    parser.add_argument('--load_velocity', type=bool, default=False, help='Whether to include velocity in training.(midi only)')
     return parser.parse_args()
 
 
@@ -224,6 +226,7 @@ def main():
             coord,
             sample_rate=wavenet_params['sample_rate'],
             gc_enabled=gc_enabled,
+            load_velocity=args.load_velocity,
             receptive_field=WaveNetModel.calculate_receptive_field(wavenet_params["filter_width"],
                                                                    wavenet_params["dilations"],
                                                                    wavenet_params["scalar_input"],
@@ -247,6 +250,7 @@ def main():
         quantization_channels=wavenet_params["quantization_channels"],
         use_biases=wavenet_params["use_biases"],
         scalar_input=wavenet_params["scalar_input"],
+        velocity_input=wavenet_params["velocity_input"],
         initial_filter_width=wavenet_params["initial_filter_width"],
         histograms=args.histograms,
         global_condition_channels=args.gc_channels,

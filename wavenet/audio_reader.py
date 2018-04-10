@@ -7,6 +7,7 @@ import threading
 import librosa
 import numpy as np
 import tensorflow as tf
+import pretty_midi
 
 FILE_PATTERN = r'p([0-9]+)_([0-9]+)\.wav'
 
@@ -32,7 +33,7 @@ def randomize_files(files):
         yield files[file_index]
 
 
-def find_files(directory, pattern='*.wav'):
+def find_files(directory, pattern='*.mid'):
     '''Recursively finds all files matching the pattern.'''
     files = []
     for root, dirnames, filenames in os.walk(directory):
@@ -41,7 +42,7 @@ def find_files(directory, pattern='*.wav'):
     return files
 
 
-def load_generic_audio(directory, sample_rate):
+def load_generic_audio(directory, sample_rate, load_velocity=False):
     '''Generator that yields audio waveforms from the directory.'''
     files = find_files(directory)
     id_reg_exp = re.compile(FILE_PATTERN)
@@ -56,10 +57,35 @@ def load_generic_audio(directory, sample_rate):
         else:
             # The file name matches the pattern for containing ids.
             category_id = int(ids[0][0])
-        audio, _ = librosa.load(filename, sr=sample_rate, mono=True)
-        audio = audio.reshape(-1, 1)
-        yield audio, filename, category_id
 
+        midi = pretty_midi.PrettyMIDI(filename)
+        midi = midi.get_piano_roll(fs = sample_rate, times = None)
+        midi = np.swapaxes(midi, 0, 1)
+        midi = np.argmax(midi, axis = -1)
+        #TODO: not sure
+        midi = np.reshape(midi, (-1, 1))
+        if load_velocity:
+            velocity = load_audio_velocity(filename, sample_rate)
+            midi = np.concatenate((midi, velocity), axis=1)
+        #audio, _ = librosa.load(filename, sr=sample_rate, mono=True)
+        #audio = audio.reshape(-1, 1)
+        yield midi, filename, category_id
+
+def load_audio_velocity(filename, sample_rate):
+    """
+    filename: must be midi
+    return: nd array (, 1), same shape as piano_roll, serves as input
+    """
+    pm = pretty_midi.PrettyMIDI(filename)
+    T = pm.get_piano_roll(fs = sample_rate).shape[1]
+    velocity = np.zeros((T, 1))
+    notes = pm.instruments[0].notes
+    fs = 1.0/sample_rate
+    for n in notes:
+        start_idx = int(n.start/fs) + 1
+        end_idx = int(n.end/fs) + 1
+        velocity[start_idx: end_idx, 0] = n.velocity
+    return velocity
 
 def trim_silence(audio, threshold, frame_length=2048):
     '''Removes silence at the beginning and end of a sample.'''
@@ -93,6 +119,7 @@ class AudioReader(object):
                  coord,
                  sample_rate,
                  gc_enabled,
+                 load_velocity,
                  receptive_field,
                  sample_size=None,
                  silence_threshold=None,
@@ -106,9 +133,11 @@ class AudioReader(object):
         self.gc_enabled = gc_enabled
         self.threads = []
         self.sample_placeholder = tf.placeholder(dtype=tf.float32, shape=None)
-        self.queue = tf.PaddingFIFOQueue(queue_size,
-                                         ['float32'],
-                                         shapes=[(None, 1)])
+        self.load_velocity = load_velocity
+        if self.load_velocity:
+            self.queue = tf.PaddingFIFOQueue(queue_size, ['float32'], shapes=[(None, 2)])
+        else:
+            self.queue = tf.PaddingFIFOQueue(queue_size, ['float32'], shapes=[(None, 1)])
         self.enqueue = self.queue.enqueue([self.sample_placeholder])
 
         if self.gc_enabled:
@@ -154,12 +183,13 @@ class AudioReader(object):
         stop = False
         # Go through the dataset multiple times
         while not stop:
-            iterator = load_generic_audio(self.audio_dir, self.sample_rate)
+            iterator = load_generic_audio(self.audio_dir, self.sample_rate, self.load_velocity)
             for audio, filename, category_id in iterator:
                 if self.coord.should_stop():
                     stop = True
                     break
-                if self.silence_threshold is not None:
+                #TODO
+                if self.silence_threshold is not None and self.silence_threshold!=0:
                     # Remove silence
                     audio = trim_silence(audio[:, 0], self.silence_threshold)
                     audio = audio.reshape(-1, 1)
