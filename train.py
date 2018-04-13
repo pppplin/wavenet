@@ -26,7 +26,7 @@ BATCH_SIZE = 2 #1
 DATA_DIRECTORY = './VCTK-Corpus/wav48/p225'
 LOGDIR_ROOT = './logdir'
 CHECKPOINT_EVERY = 50
-NUM_STEPS = int(1e5)
+NUM_STEPS = int(300)
 LEARNING_RATE = 1e-3
 WAVENET_PARAMS = './wavenet_params.json'
 STARTED_DATESTRING = "{0:%Y-%m-%dT%H-%M-%S}".format(datetime.now())
@@ -106,8 +106,8 @@ def get_arguments():
     parser.add_argument('--max_checkpoints', type=int, default=MAX_TO_KEEP,
                         help='Maximum amount of checkpoints that will be kept alive. Default: '
                              + str(MAX_TO_KEEP) + '.')
-    parser.add_argument('--early_stop', type=bool, default=False, help='Wherther to use validate set to early stop.')
-    parser.add_argument('--load_velocity', type=bool, default=False, help='Whether to include velocity in training.(midi only)')
+    parser.add_argument('--early_stop', type=_str_to_bool, default=False, help='Wherther to use validate set to early stop.')
+    parser.add_argument('--load_velocity', type=_str_to_bool, default=False, help='Whether to include velocity in training.(midi only)')
     return parser.parse_args()
 
 
@@ -250,7 +250,8 @@ def main():
         quantization_channels=wavenet_params["quantization_channels"],
         use_biases=wavenet_params["use_biases"],
         scalar_input=wavenet_params["scalar_input"],
-        velocity_input=wavenet_params["velocity_input"],
+        velocity_input=args.load_velocity,
+        midi_input=wavenet_params["midi_input"],
         initial_filter_width=wavenet_params["initial_filter_width"],
         histograms=args.histograms,
         global_condition_channels=args.gc_channels,

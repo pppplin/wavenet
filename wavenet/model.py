@@ -53,6 +53,7 @@ class WaveNetModel(object):
                  use_biases=False,
                  scalar_input=False,
                  velocity_input=False,
+                 midi_input=False,
                  initial_filter_width=32,
                  histograms=False,
                  global_condition_channels=None,
@@ -107,6 +108,7 @@ class WaveNetModel(object):
         self.skip_channels = skip_channels
         self.scalar_input = scalar_input
         self.velocity_input = velocity_input
+        self.midi_input = midi_input
         self.initial_filter_width = initial_filter_width
         self.histograms = histograms
         self.global_condition_channels = global_condition_channels
@@ -156,8 +158,7 @@ class WaveNetModel(object):
                 if self.scalar_input:
                     initial_channels = 1
                     initial_filter_width = self.initial_filter_width
-                #TODO
-                if self.velocity_input:
+                elif self.velocity_input:
                     initial_channels = 2
                     initial_filter_width = self.initial_filter_width#TODO
                 else:
@@ -622,6 +623,8 @@ class WaveNetModel(object):
             encoded = tf.one_hot(waveform, self.quantization_channels)
             encoded = tf.reshape(encoded, [-1, self.quantization_channels])
             #TODO
+            if self.velocity_input:
+                encoded = tf.cast(waveform, tf.float32)
             gc_embedding = self._embed_gc(global_condition)
             raw_output = self._create_generator(encoded, gc_embedding)
             out = tf.reshape(raw_output, [-1, self.quantization_channels])
@@ -645,8 +648,10 @@ class WaveNetModel(object):
         with tf.name_scope(name):
             # We mu-law encode and quantize the input audioform.
             #TODO
-            #encoded_input = input_batch
-            encoded_input = mu_law_encode(input_batch, self.quantization_channels)
+            if self.midi_input:
+                encoded_input = tf.to_int32(input_batch)
+            else:
+                encoded_input = mu_law_encode(input_batch, self.quantization_channels)
 
             gc_embedding = self._embed_gc(global_condition_batch)
             encoded = self._one_hot(encoded_input)

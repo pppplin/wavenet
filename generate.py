@@ -11,8 +11,11 @@ import numpy as np
 import tensorflow as tf
 
 from wavenet import WaveNetModel, mu_law_decode, mu_law_encode, audio_reader
+from wavenet.audio_reader import load_audio_velocity
+from reverse_pianoroll import array_to_pretty_midi
 
 from gpu import define_gpu
+import pretty_midi
 define_gpu(2)
 
 SAMPLES = 16000
@@ -45,7 +48,7 @@ def get_arguments():
         '--samples',
         type=int,
         default=SAMPLES,
-        help='How many waveform samples to generate')
+        help='How many samples to generate')
     parser.add_argument(
         '--temperature',
         type=_ensure_positive_float,
@@ -67,6 +70,12 @@ def get_arguments():
         type=str,
         default=None,
         help='Path to output wav file')
+    #TODO
+    parser.add_argument(
+        '--mid_out_path',
+        type=str,
+        default=None,
+        help='Path to output mid file')
     parser.add_argument(
         '--save_every',
         type=int,
@@ -75,8 +84,8 @@ def get_arguments():
     parser.add_argument(
         '--fast_generation',
         type=_str_to_bool,
-        default=True,
-        help='Use fast generation')
+        default=True, #TODO: non-fast not working now!!
+        help='Use fast generation, i.e. only feed in the last sample for prediction')
     parser.add_argument(
         '--wav_seed',
         type=str,
@@ -98,6 +107,8 @@ def get_arguments():
         type=int,
         default=None,
         help='ID of category to generate, if globally conditioned.')
+    parser.add_argument('--load_velocity', type=_str_to_bool, default=False, help='Whether to include velocity in training.')
+    parser.add_argument('--midi_input', type=_str_to_bool, default=True)
     arguments = parser.parse_args()
     if arguments.gc_channels is not None:
         if arguments.gc_cardinality is None:
@@ -118,6 +129,26 @@ def write_wav(waveform, sample_rate, filename):
     librosa.output.write_wav(filename, y, sample_rate)
     print('Updated wav file at {}'.format(filename))
 
+#TODO
+def convert_to_mid(array, sample_rate, filename, velocity):
+    """
+    array: np.ndarray, shape = (?, 1), directed generated array
+    save as midi file
+    """
+    print(array.shape)
+    if velocity:
+        array = np.asarray(array)
+        print(array, array.shape)
+        array.tofile("test.dat")
+    arr = np.rint(array)
+    arr = np.reshape(arr, (-1, ))
+    arr = np.clip(arr, 0, 127)
+    arr = arr.astype(int)
+    #pr = np.zeros((n, 128))
+    #pr[np.arange(n), arr] = 1
+    #pr = np.swapaxes(pr, 0, 1).astype(int)
+    mid = array_to_pretty_midi(arr, fs = sample_rate)
+    #mid.write(filename)
 
 def create_seed(filename,
                 sample_rate,
@@ -133,6 +164,31 @@ def create_seed(filename,
                         lambda: tf.constant(window_size))
 
     return quantized[:cut_index]
+
+def create_midi_seed(filename,
+                     sample_rate,
+                     quantization_channels,
+                     window_size,
+                     silence_threshold=SILENCE_THRESHOLD, velocity = False):
+    midi = pretty_midi.PrettyMIDI(filename)
+    midi = midi.get_piano_roll(fs = sample_rate, times = None)
+
+    midi = np.swapaxes(midi, 0, 1)
+    midi = np.argmax(midi, axis = -1)
+    #TODO
+    midi = midi.astype(np.float32)
+    cut_index = np.size(midi) if np.size(midi)<window_size else window_size
+    if velocity:
+        midi = np.reshape(midi, (-1, 1))
+        velocity = load_audio_velocity(filename, sample_rate)
+        midi = np.concatenate((midi, velocity), axis=1)
+    #quantized = mu_law_encode(midi, quantization_channels)
+    #cut_index = np.size(midi) if np.size(midi)<tf.constant(window_size) else tf.constant(window_size)
+    #cut_index = tf.cond(tf.constant(midi.size) < tf.constant(window_size),
+    #                    lambda: tf.constant(midi.size),
+    #                    lambda: tf.constant(window_size))
+
+    return tf.stack(midi[:cut_index])
 
 
 def main():
@@ -152,6 +208,8 @@ def main():
         dilation_channels=wavenet_params['dilation_channels'],
         quantization_channels=wavenet_params['quantization_channels'],
         skip_channels=wavenet_params['skip_channels'],
+        velocity_input=args.load_velocity,
+        midi_input=wavenet_params["midi_input"],
         use_biases=wavenet_params['use_biases'],
         scalar_input=wavenet_params['scalar_input'],
         initial_filter_width=wavenet_params['initial_filter_width'],
@@ -177,14 +235,33 @@ def main():
     print('Restoring model from {}'.format(args.checkpoint))
     saver.restore(sess, args.checkpoint)
 
-    decode = mu_law_decode(samples, wavenet_params['quantization_channels'])
+
+    if not args.midi_input:
+        decode = mu_law_decode(samples, wavenet_params['quantization_channels'])
+    else:
+        decode = tf.to_int32(samples)
     quantization_channels = wavenet_params['quantization_channels']
+    sample_rate = wavenet_params['sample_rate']
     if args.wav_seed:
-        seed = create_seed(args.wav_seed,
-                           wavenet_params['sample_rate'],
-                           quantization_channels,
-                           net.receptive_field)
+        if not args.midi_input:
+            seed = create_seed(args.wav_seed,
+                            wavenet_params['sample_rate'],
+                            quantization_channels,
+                            net.receptive_field)
+        else:
+            seed = create_midi_seed(args.wav_seed,
+                            wavenet_params['sample_rate'],
+                            quantization_channels,
+                            net.receptive_field,
+                            velocity = args.load_velocity)
         waveform = sess.run(seed).tolist()
+        if args.load_velocity:
+            wave_array = np.asarray(waveform)
+            sample_max = np.max(wave_array[:, 0])
+            sample_min = np.min(wave_array[:, 0])
+        else:
+            sample_max = max(waveform)
+            sample_min = min(waveform)
     else:
         # Silence with a single random sample at the end.
         waveform = [quantization_channels / 2] * (net.receptive_field - 1)
@@ -202,9 +279,13 @@ def main():
 
         print('Priming generation...')
         for i, x in enumerate(waveform[-net.receptive_field: -1]):
+            if args.load_velocity:
+                x = np.asarray(x)
+                x = np.reshape(x, (1, 2))
             if i % 100 == 0:
                 print('Priming sample {}'.format(i))
             sess.run(outputs, feed_dict={samples: x})
+
         print('Done.')
 
     last_sample_timestamp = datetime.now()
@@ -214,11 +295,16 @@ def main():
             outputs.extend(net.push_ops)
             window = waveform[-1]
         else:
+            #TODO not working
             if len(waveform) > net.receptive_field:
                 window = waveform[-net.receptive_field:]
             else:
                 window = waveform
             outputs = [next_sample]
+
+        if args.load_velocity:
+            win = np.asarray(window)
+            window = np.reshape(win, (1,2))
 
         # Run the WaveNet to predict the next sample.
         prediction = sess.run(outputs, feed_dict={samples: window})[0]
@@ -239,10 +325,19 @@ def main():
                     err_msg='Prediction scaling at temperature=1.0 '
                             'is not working as intended.')
 
-        sample = np.random.choice(
-            np.arange(quantization_channels), p=scaled_prediction)
-        waveform.append(sample)
+        #TODO: WHAT IS THIS??
+        sample = np.random.choice(np.arange(quantization_channels), p=scaled_prediction)
+        #TODO
 
+        if args.wav_seed and sample>=sample_min and sample<=sample_max and not args.load_velocity:
+            waveform.append(sample)
+        elif args.wav_seed is None:
+            waveform.append(sample)
+        elif args.load_velocity:
+            #TODO: TEMP!!
+            sample = np.reshape(scaled_prediction, (1,2))
+            print(sample.tolist())
+            waveform.append(sample.tolist())
         # Show progress only once per second.
         current_sample_timestamp = datetime.now()
         time_since_print = current_sample_timestamp - last_sample_timestamp
@@ -252,27 +347,33 @@ def main():
             last_sample_timestamp = current_sample_timestamp
 
         # If we have partial writing, save the result so far.
-        if (args.wav_out_path and args.save_every and
+        #TODO
+        if (args.mid_out_path and args.save_every and
                 (step + 1) % args.save_every == 0):
             out = sess.run(decode, feed_dict={samples: waveform})
-            write_wav(out, wavenet_params['sample_rate'], args.wav_out_path)
-
+            convert_to_mid(out, sample_rate, args.mid_out_path, args.load_velocity)
     # Introduce a newline to clear the carriage return from the progress.
     print()
 
     # Save the result as an audio summary.
-    datestring = str(datetime.now()).replace(' ', 'T')
-    writer = tf.summary.FileWriter(logdir)
-    tf.summary.audio('generated', decode, wavenet_params['sample_rate'])
-    summaries = tf.summary.merge_all()
-    summary_out = sess.run(summaries,
-                           feed_dict={samples: np.reshape(waveform, [-1, 1])})
-    writer.add_summary(summary_out)
+    #datestring = str(datetime.now()).replace(' ', 'T')
+    #writer = tf.summary.FileWriter(logdir)
+    #tf.summary.audio('generated', decode, wavenet_params['sample_rate'])
+    #summaries = tf.summary.merge_all()
+    #summary_out = sess.run(summaries,
+    #                       feed_dict={samples: np.reshape(waveform, [-1, 1])})
+    #writer.add_summary(summary_out)
 
-    # Save the result as a wav file.
-    if args.wav_out_path:
-        out = sess.run(decode, feed_dict={samples: waveform})
-        write_wav(out, wavenet_params['sample_rate'], args.wav_out_path)
+    # Save the result as file.
+    #TODO
+    #waveform = np.reshape(waveform, [-1, 1])
+    if args.mid_out_path:
+        #out = sess.run(decode, feed_dict={samples: waveform})
+        #TODO
+        #out = sess.run(decode, feed_dict={samples: waveform})
+        #print(tf.shape(decode))
+        out = np.reshape(waveform, [-1, 1])
+        convert_to_mid(out, sample_rate, args.mid_out_path, args.load_velocity)
 
     print('Finished generating. The result can be viewed in TensorBoard.')
 
