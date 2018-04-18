@@ -56,26 +56,27 @@ def batch_to_time(value, dilation, velocity=False, name=None):
                           [tf.div(shape[0], dilation), -1, shape[2]])
 
 
-def causal_conv(value, filter_, dilation, velocity=False, name='causal_conv'):
+def causal_conv(value, filter_, dilation, velocity_input=False, name='causal_conv'):
     with tf.name_scope(name):
         filter_width = tf.shape(filter_)[0]
         if dilation > 1:
-            transformed = time_to_batch(value, dilation)
-            if velocity:
-                conv = tf.nn.conv2d(transformed, filter_, stride=1, padding='VALID')
-                restored = batch_to_time(conv, dilation)
+            if velocity_input:
+                transformed = time_to_batch(value, dilation, velocity=True)
+                conv = tf.nn.conv2d(transformed, filter_, strides=[1,1,1,1], padding='VALID')
+                restored = batch_to_time(conv, dilation, velocity=True)
             else:
+                transformed = time_to_batch(value, dilation)
                 conv = tf.nn.conv1d(transformed, filter_, stride=1,
                                 padding='VALID')
                 restored = batch_to_time(conv, dilation)
         else:
-            if velocity:
-                restored = tf.nn.conv2d(value, filter_, stride=1, padding='VALID')
+            if velocity_input:
+                restored = tf.nn.conv2d(value, filter_, strides=[1,1,1,1], padding='VALID')
             else:
                 restored = tf.nn.conv1d(value, filter_, stride=1, padding='VALID')
         # Remove excess elements at the end.
         out_width = tf.shape(value)[1] - (filter_width - 1) * dilation
-        if velocity:
+        if velocity_input:
             result = tf.slice(restored,
                         [0, 0, 0, 0],
                         [-1, out_width, -1, -1])
@@ -84,7 +85,6 @@ def causal_conv(value, filter_, dilation, velocity=False, name='causal_conv'):
                           [0, 0, 0],
                           [-1, out_width, -1])
         return result
-
 
 def mu_law_encode(audio, quantization_channels):
     '''Quantizes waveform amplitudes.'''

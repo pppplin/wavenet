@@ -313,13 +313,14 @@ class WaveNetModel(object):
 
         if self.velocity_input:
             weights_filter = variables['filter_velocity']
-            weights_filter = variables['gate_velocity']
+            weights_gate = variables['gate_velocity']
+            conv_filter = causal_conv(input_batch, weights_filter, dilation, velocity_input=True)
+            conv_gate = causal_conv(input_batch, weights_gate, dilation, velocity_input=True)
         else:
             weights_filter = variables['filter']
             weights_gate = variables['gate']
-
-        conv_filter = causal_conv(input_batch, weights_filter, dilation)
-        conv_gate = causal_conv(input_batch, weights_gate, dilation)
+            conv_filter = causal_conv(input_batch, weights_filter, dilation)
+            conv_gate = causal_conv(input_batch, weights_gate, dilation)
 
         if global_condition_batch is not None:
             if self.velocity_input:
@@ -350,7 +351,7 @@ class WaveNetModel(object):
         if self.velocity_input:
             weights_dense = variables['dense_velocity']
             transformed = tf.nn.conv2d(
-                    out, weights_dense, stride=1, padding="SAME", name="dense")
+                    out, weights_dense, strides=[1,1,1,1], padding="SAME", name="dense")
         else:
             weights_dense = variables['dense']
             transformed = tf.nn.conv1d(
@@ -369,7 +370,7 @@ class WaveNetModel(object):
         if self.velocity_input:
             weights_skip = variables['skip_velocity']
             skip_contribution = tf.nn.conv2d(
-                    out_skip, weights_skip, stride=1, padding="SAME", name="skip")
+                    out_skip, weights_skip, strides=[1,1,1,1], padding="SAME", name="skip")
         else:
             weights_skip = variables['skip']
             skip_contribution = tf.nn.conv1d(
@@ -508,7 +509,7 @@ class WaveNetModel(object):
             total = sum(outputs)
             transformed1 = tf.nn.relu(total)
             if self.velocity_input:
-                conv1 = tf.nn.conv2d(transformed1, w1, stride=1, padding="SAME")
+                conv1 = tf.nn.conv2d(transformed1, w1, strides=[1,1,1,1], padding="SAME")
             else:
                 conv1 = tf.nn.conv1d(transformed1, w1, stride=1, padding="SAME")
             if self.use_biases:
@@ -516,7 +517,7 @@ class WaveNetModel(object):
                 conv1 = tf.add(conv1, b1)
             transformed2 = tf.nn.relu(conv1)
             if self.velocity_input:
-                conv2 = tf.nn.conv2d(transformed2, w2, stride=1, padding="SAME")
+                conv2 = tf.nn.conv2d(transformed2, w2, strides=[1,1,1,1], padding="SAME")
             else:
                 conv2 = tf.nn.conv1d(transformed2, w2, stride=1, padding="SAME")
             if self.use_biases:
