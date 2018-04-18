@@ -158,9 +158,6 @@ class WaveNetModel(object):
                 if self.scalar_input:
                     initial_channels = 1
                     initial_filter_width = self.initial_filter_width
-                elif self.velocity_input:
-                    initial_channels = 2
-                    initial_filter_width = self.initial_filter_width#TODO
                 else:
                     initial_channels = self.quantization_channels
                     initial_filter_width = self.filter_width
@@ -169,6 +166,12 @@ class WaveNetModel(object):
                     [initial_filter_width,
                      initial_channels,
                      self.residual_channels])
+                layer['filter_velocity'] = create_variable(
+                    'filter_velocity',
+                    [initial_filter_width,
+                    1,
+                    initial_channels,
+                    self.residual_channels])
                 var['causal_layer'] = layer
 
             var['dilated_stack'] = list()
@@ -186,17 +189,34 @@ class WaveNetModel(object):
                             [self.filter_width,
                              self.residual_channels,
                              self.dilation_channels])
+                        current['filter_velocity'] = create_variable(
+                                'filter_velocity',
+                                [self.filter_width,
+                                1,
+                                self.residual_channels,
+                                self.dilation_channels])
+                        current['gate_velocity'] = create_variable(
+                                'gate_velocity',
+                                [self.filter_width,
+                                1,
+                                self.residual_channels,
+                                self.dilation_channels])
                         current['dense'] = create_variable(
                             'dense',
                             [1,
                              self.dilation_channels,
                              self.residual_channels])
+                        current['dense_velocity'] = create_variable(
+                                'dense_velocity',
+                                [1, 1, self.dilation_channels, self.residual_channels])
                         current['skip'] = create_variable(
                             'skip',
                             [1,
                              self.dilation_channels,
                              self.skip_channels])
-
+                        current['skip_velocity'] = create_variable(
+                            'skip_velocity',
+                            [1, 1, self.dilation_channels, self.skip_channels])
                         if self.global_condition_channels is not None:
                             current['gc_gateweights'] = create_variable(
                                 'gc_gate',
@@ -231,6 +251,12 @@ class WaveNetModel(object):
                 current['postprocess2'] = create_variable(
                     'postprocess2',
                     [1, self.skip_channels, self.quantization_channels])
+                current['postprocess1_velocity'] = create_variable(
+                        'postprocess1_velocity',
+                        [1, 1, self.skip_channels, self.skip_channels])
+                current['postprocess2_velocity'] = create_variable(
+                        'postprocess2_velocity',
+                        [1, 1, self.skip_channels, self.quantization_channels])
                 if self.use_biases:
                     current['postprocess1_bias'] = create_bias_variable(
                         'postprocess1_bias',
@@ -248,8 +274,12 @@ class WaveNetModel(object):
         The layer can change the number of channels.
         '''
         with tf.name_scope('causal_layer'):
-            weights_filter = self.variables['causal_layer']['filter']
-            return causal_conv(input_batch, weights_filter, 1)
+            if self.velocity_input:
+                weights_filter = self.variables['causal_layer']['filter_velocity']
+                return causal_conv(input_batch, weights_filter, 1, velocity_input=True)
+            else:
+                weights_filter = self.variables['causal_layer']['filter']
+                return causal_conv(input_batch, weights_filter, 1)
 
     def _create_dilation_layer(self, input_batch, layer_index, dilation,
                                global_condition_batch, output_width):
@@ -281,13 +311,20 @@ class WaveNetModel(object):
         '''
         variables = self.variables['dilated_stack'][layer_index]
 
-        weights_filter = variables['filter']
-        weights_gate = variables['gate']
+        if self.velocity_input:
+            weights_filter = variables['filter_velocity']
+            weights_filter = variables['gate_velocity']
+        else:
+            weights_filter = variables['filter']
+            weights_gate = variables['gate']
 
         conv_filter = causal_conv(input_batch, weights_filter, dilation)
         conv_gate = causal_conv(input_batch, weights_gate, dilation)
 
         if global_condition_batch is not None:
+            if self.velocity_input:
+                raise NotImplementedError("Global_condition_batch only supports non-velocity case, \
+                                            i.e. (bs, T, STH, channels) not supported.")
             weights_gc_filter = variables['gc_filtweights']
             conv_filter = conv_filter + tf.nn.conv1d(global_condition_batch,
                                                      weights_gc_filter,
@@ -300,8 +337,8 @@ class WaveNetModel(object):
                                                  stride=1,
                                                  padding="SAME",
                                                  name="gc_gate")
-
         if self.use_biases:
+            #TODO velocity, assume bias broadcast works.
             filter_bias = variables['filter_bias']
             gate_bias = variables['gate_bias']
             conv_filter = tf.add(conv_filter, filter_bias)
@@ -310,23 +347,36 @@ class WaveNetModel(object):
         out = tf.tanh(conv_filter) * tf.sigmoid(conv_gate)
 
         # The 1x1 conv to produce the residual output
-        weights_dense = variables['dense']
-        transformed = tf.nn.conv1d(
-            out, weights_dense, stride=1, padding="SAME", name="dense")
+        if self.velocity_input:
+            weights_dense = variables['dense_velocity']
+            transformed = tf.nn.conv2d(
+                    out, weights_dense, stride=1, padding="SAME", name="dense")
+        else:
+            weights_dense = variables['dense']
+            transformed = tf.nn.conv1d(
+                    out, weights_dense, stride=1, padding="SAME", name="dense")
 
         # The 1x1 conv to produce the skip output
         skip_cut = tf.shape(out)[1] - output_width
-        #TODO
-        out_skip_slice = tf.slice(out, [0, tf.abs(skip_cut), 0], [-1, -1, -1])
-        out_skip_pad = tf.image.resize_image_with_crop_or_pad(out, tf.shape(out)[0], output_width)
-        out_skip = tf.cond(tf.less(skip_cut, 0),
-                    lambda: out_skip_pad,
-                    lambda: out_skip_slice)
-        weights_skip = variables['skip']
-        skip_contribution = tf.nn.conv1d(
-            out_skip, weights_skip, stride=1, padding="SAME", name="skip")
+        out_skip = tf.slice(out, [0, skip_cut, 0, 0], [-1, -1, -1, -1])
+        #out_skip_slice = tf.slice(out, [0, tf.abs(skip_cut), 0], [-1, -1, -1])
+        #This is for velocity, but outdated
+        #out_skip_pad = tf.image.resize_image_with_crop_or_pad(out, tf.shape(out)[0], output_width)
+        #out_skip = tf.cond(tf.less(skip_cut, 0),
+                    #lambda: out_skip_pad,
+                    #lambda: out_skip_slice)
+
+        if self.velocity_input:
+            weights_skip = variables['skip_velocity']
+            skip_contribution = tf.nn.conv2d(
+                    out_skip, weights_skip, stride=1, padding="SAME", name="skip")
+        else:
+            weights_skip = variables['skip']
+            skip_contribution = tf.nn.conv1d(
+                    out_skip, weights_skip, stride=1, padding="SAME", name="skip")
 
         if self.use_biases:
+            #TODO: about velocity, again assuming broadcast works
             dense_bias = variables['dense_bias']
             skip_bias = variables['skip_bias']
             transformed = transformed + dense_bias
@@ -345,7 +395,10 @@ class WaveNetModel(object):
                 tf.summary.histogram(layer + '_biases_skip', skip_bias)
 
         input_cut = tf.shape(input_batch)[1] - tf.shape(transformed)[1]
-        input_batch = tf.slice(input_batch, [0, input_cut, 0], [-1, -1, -1])
+        if self.velocity_input:
+            input_batch = tf.slice(input_batch, [0, input_cut, 0, 0], [-1, -1, -1, -1])
+        else:
+            input_batch = tf.slice(input_batch, [0, input_cut, 0], [-1, -1, -1])
 
         return skip_contribution, input_batch + transformed
 
@@ -433,8 +486,12 @@ class WaveNetModel(object):
         with tf.name_scope('postprocessing'):
             # Perform (+) -> ReLU -> 1x1 conv -> ReLU -> 1x1 conv to
             # postprocess the output.
-            w1 = self.variables['postprocessing']['postprocess1']
-            w2 = self.variables['postprocessing']['postprocess2']
+            if self.velocity_input:
+                w1 = self.variables['postprocessing']['postprocess1_velocity']
+                w2 = self.variables['postprocessing']['postprocess2_velocity']
+            else:
+                w1 = self.variables['postprocessing']['postprocess1']
+                w2 = self.variables['postprocessing']['postprocess2']
             if self.use_biases:
                 b1 = self.variables['postprocessing']['postprocess1_bias']
                 b2 = self.variables['postprocessing']['postprocess2_bias']
@@ -450,11 +507,18 @@ class WaveNetModel(object):
             # all up here.
             total = sum(outputs)
             transformed1 = tf.nn.relu(total)
-            conv1 = tf.nn.conv1d(transformed1, w1, stride=1, padding="SAME")
+            if self.velocity_input:
+                conv1 = tf.nn.conv2d(transformed1, w1, stride=1, padding="SAME")
+            else:
+                conv1 = tf.nn.conv1d(transformed1, w1, stride=1, padding="SAME")
             if self.use_biases:
+                #TODO velocity assume braodcast works
                 conv1 = tf.add(conv1, b1)
             transformed2 = tf.nn.relu(conv1)
-            conv2 = tf.nn.conv1d(transformed2, w2, stride=1, padding="SAME")
+            if self.velocity_input:
+                conv2 = tf.nn.conv2d(transformed2, w2, stride=1, padding="SAME")
+            else:
+                conv2 = tf.nn.conv1d(transformed2, w2, stride=1, padding="SAME")
             if self.use_biases:
                 conv2 = tf.add(conv2, b2)
 
@@ -534,17 +598,22 @@ class WaveNetModel(object):
 
     def _one_hot(self, input_batch):
         '''One-hot encodes the waveform amplitudes.
-
         This allows the definition of the network as a categorical distribution
         over a finite set of possible amplitudes.
         '''
         with tf.name_scope('one_hot_encode'):
-            encoded = tf.one_hot(
-                input_batch,
-                depth=self.quantization_channels,
-                dtype=tf.float32)
-            shape = [self.batch_size, -1, self.quantization_channels]
-            encoded = tf.reshape(encoded, shape)
+            if self.velocity_input:
+                input_re = tf.reshape(input_batch, [self.batch_size, -1, 1])
+                encoded = tf.one_hot(input_re, depth=self.quantization_channels, dtype=tf.float32)
+                shape = [self.batch_size, -1, 2, self.quantization_channels]
+                encoded = tf.reshape(encoded, shape)
+            else:
+                encoded = tf.one_hot(
+                    input_batch,
+                    depth=self.quantization_channels,
+                    dtype=tf.float32)
+                shape = [self.batch_size, -1, self.quantization_channels]
+                encoded = tf.reshape(encoded, shape)
         return encoded
 
     def _embed_gc(self, global_condition):
@@ -664,20 +733,33 @@ class WaveNetModel(object):
 
             # Cut off the last sample of network input to preserve causality.
             network_input_width = tf.shape(network_input)[1] - 1
-            network_input = tf.slice(network_input, [0, 0, 0],
+            if self.velocity_input:
+                network_input = tf.slice(network_input, [0, 0, 0, 0],
+                                        [-1, network_input_width, -1, -1])
+            else:
+                network_input = tf.slice(network_input, [0, 0, 0],
                                      [-1, network_input_width, -1])
 
             raw_output = self._create_network(network_input, gc_embedding)
-
+            #TODO velocity HERE!!
             with tf.name_scope('loss'):
                 # Cut off the samples corresponding to the receptive field
                 # for the first predicted sample.
-                target_output = tf.slice(
-                    tf.reshape(
-                        encoded,
-                        [self.batch_size, -1, self.quantization_channels]),
-                    [0, self.receptive_field, 0],
-                    [-1, -1, -1])
+                if self.velocity_input:
+                    target_output = tf.slice(
+                            tf.reshape(
+                                encoded,
+                                [self.batch_size, -1, 2, self.quantization_channels]
+                                ),
+                            [0, self.receptive_field, 0, 0],
+                            [-1, -1, -1, -1])
+                else:
+                    target_output = tf.slice(
+                            tf.reshape(
+                                encoded,
+                                [self.batch_size, -1, self.quantization_channels]),
+                            [0, self.receptive_field, 0],
+                            [-1, -1, -1])
                 target_output = tf.reshape(target_output,
                                            [-1, self.quantization_channels])
                 prediction = tf.reshape(raw_output,
@@ -705,3 +787,4 @@ class WaveNetModel(object):
                     tf.summary.scalar('total_loss', total_loss)
 
                     return total_loss
+
