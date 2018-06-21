@@ -56,6 +56,7 @@ class WaveNetModel(object):
                  midi_input=False,
                  initial_filter_width=32,
                  histograms=False,
+                 load_chord=False,
                  global_condition_channels=None,
                  global_condition_cardinality=None):
         '''Initializes the WaveNet model.
@@ -96,7 +97,6 @@ class WaveNetModel(object):
                 categories, where N = global_condition_cardinality. If None,
                 then the global_condition tensor is regarded as a vector which
                 must have dimension global_condition_channels.
-
         '''
         self.batch_size = batch_size
         self.dilations = dilations
@@ -113,6 +113,7 @@ class WaveNetModel(object):
         self.histograms = histograms
         self.global_condition_channels = global_condition_channels
         self.global_condition_cardinality = global_condition_cardinality
+        self.load_chord = load_chord
 
         self.receptive_field = WaveNetModel.calculate_receptive_field(
             self.filter_width, self.dilations, self.scalar_input,
@@ -314,6 +315,7 @@ class WaveNetModel(object):
         if self.velocity_input:
             weights_filter = variables['filter_velocity']
             weights_gate = variables['gate_velocity']
+            #out_width
             conv_filter = causal_conv(input_batch, weights_filter, dilation, velocity_input=True)
             conv_gate = causal_conv(input_batch, weights_gate, dilation, velocity_input=True)
         else:
@@ -326,12 +328,18 @@ class WaveNetModel(object):
             if self.velocity_input:
                 raise NotImplementedError("Global_condition_batch only supports non-velocity case, \
                                             i.e. (bs, T, STH, channels) not supported.")
+            #pad global_condition!!
+            if self.load_chord:
+                cut_width = tf.shape(conv_filter)[1]
+                global_condition_batch = tf.slice(global_condition_batch, [0, 0, 0], [-1, cut_width,-1])
+
             weights_gc_filter = variables['gc_filtweights']
             conv_filter = conv_filter + tf.nn.conv1d(global_condition_batch,
-                                                     weights_gc_filter,
-                                                     stride=1,
-                                                     padding="SAME",
-                                                     name="gc_filter")
+                                                    weights_gc_filter,
+                                                    stride=1,
+                                                    padding="SAME",
+                                                    name="gc_filter")
+
             weights_gc_gate = variables['gc_gateweights']
             conv_gate = conv_gate + tf.nn.conv1d(global_condition_batch,
                                                  weights_gc_gate,
@@ -346,7 +354,7 @@ class WaveNetModel(object):
             conv_gate = tf.add(conv_gate, gate_bias)
 
         out = tf.tanh(conv_filter) * tf.sigmoid(conv_gate)
-
+        #out = tf.nn.relu(conv_filter) * tf.nn.relu(conv_gate)
         # The 1x1 conv to produce the residual output
         if self.velocity_input:
             weights_dense = variables['dense_velocity']
@@ -359,7 +367,11 @@ class WaveNetModel(object):
 
         # The 1x1 conv to produce the skip output
         skip_cut = tf.shape(out)[1] - output_width
-        out_skip = tf.slice(out, [0, skip_cut, 0, 0], [-1, -1, -1, -1])
+        #TODO: BUG: HERE REQUIRES VERY LONG INPUT LIKE jazz_224
+        if self.velocity_input:
+            out_skip = tf.slice(out, [0, skip_cut, 0, 0], [-1, -1, -1, -1])
+        else:
+            out_skip = tf.slice(out, [0, skip_cut, 0], [-1, -1, -1])
         #out_skip_slice = tf.slice(out, [0, tf.abs(skip_cut), 0], [-1, -1, -1])
         #This is for velocity, but outdated
         #out_skip_pad = tf.image.resize_image_with_crop_or_pad(out, tf.shape(out)[0], output_width)
@@ -405,16 +417,23 @@ class WaveNetModel(object):
 
     def _generator_conv(self, input_batch, state_batch, weights):
         '''Perform convolution for a single convolutional processing step.'''
-        # TODO generalize to filter_width > 2
-        past_weights = weights[0, :, :]
-        curr_weights = weights[1, :, :]
-        output = tf.matmul(state_batch, past_weights) + tf.matmul(
-            input_batch, curr_weights)
+        #TODO velocity assume works
+        if self.velocity_input:
+            past_weights = weights[0, :, :, :]
+            curr_weights = weights[1, :, :, :]
+        else:
+            past_weights = weights[0, :, :]
+            curr_weights = weights[1, :, :]
+
+        output = tf.matmul(state_batch, past_weights) + tf.matmul(input_batch, curr_weights)
         return output
 
     def _generator_causal_layer(self, input_batch, state_batch):
         with tf.name_scope('causal_layer'):
-            weights_filter = self.variables['causal_layer']['filter']
+            if self.velocity_input:
+                weights_filter = self.variables['causal_layer']['filter_velocity']
+            else:
+                weights_filter = self.variables['causal_layer']['filter']
             output = self._generator_conv(
                 input_batch, state_batch, weights_filter)
         return output
@@ -423,16 +442,31 @@ class WaveNetModel(object):
                                   dilation, global_condition_batch):
         variables = self.variables['dilated_stack'][layer_index]
 
-        weights_filter = variables['filter']
-        weights_gate = variables['gate']
-        output_filter = self._generator_conv(
-            input_batch, state_batch, weights_filter)
-        output_gate = self._generator_conv(
-            input_batch, state_batch, weights_gate)
+        if self.velocity_input:
+            weights_filter = variables['filter_velocity']
+            weights_gate = variables['gate_velocity']
+            output_filter = self._generator_conv(
+                    input_batch, state_batch, weights_filter)
+            output_gate = self._generator_conv(
+                    input_batch, state_batch, weights_filter)
+        else:
+            weights_filter = variables['filter']
+            weights_gate = variables['gate']
+            output_filter = self._generator_conv(
+                input_batch, state_batch, weights_filter)
+            output_gate = self._generator_conv(
+                input_batch, state_batch, weights_gate)
 
         if global_condition_batch is not None:
+            if self.velocity_input:
+                raise NotImplementedError("Velocity not implemented for global.")
+            if self.load_chord:
+                cut_width = tf.div(tf.shape(output_filter)[1], self.dilation_channels)
+                global_condition_batch = tf.slice(global_condition_batch, [0, 0, 0], [-1, cut_width, -1])
+
             global_condition_batch = tf.reshape(global_condition_batch,
                                                 shape=(1, -1))
+
             weights_gc_filter = variables['gc_filtweights']
             weights_gc_filter = weights_gc_filter[0, :, :]
             output_filter += tf.matmul(global_condition_batch,
@@ -447,14 +481,23 @@ class WaveNetModel(object):
             output_gate = output_gate + variables['gate_bias']
 
         out = tf.tanh(output_filter) * tf.sigmoid(output_gate)
+        #out = tf.nn.relu(output_filter) * tf.nn.relu(output_gate)
 
-        weights_dense = variables['dense']
-        transformed = tf.matmul(out, weights_dense[0, :, :])
+        if self.velocity_input:
+            weights_dense = variables['dense_velocity']
+            transformed = tf.matmul(out, weights_dense[0, :, :, :])
+        else:
+            weights_dense = variables['dense']
+            transformed = tf.matmul(out, weights_dense[0, :, :])
         if self.use_biases:
             transformed = transformed + variables['dense_bias']
 
-        weights_skip = variables['skip']
-        skip_contribution = tf.matmul(out, weights_skip[0, :, :])
+        if self.velocity_input:
+            weights_skip = variables['skip_velocity']
+            skip_contribution = tf.matmul(out, weights_skip[0, :, :, :])
+        else:
+            weights_skip = variables['skip']
+            skip_contribution = tf.matmul(out, weights_skip[0, :, :])
         if self.use_biases:
             skip_contribution = skip_contribution + variables['skip_bias']
 
@@ -532,12 +575,17 @@ class WaveNetModel(object):
         outputs = []
         current_layer = input_batch
 
-        q = tf.FIFOQueue(
-            1,
-            dtypes=tf.float32,
-            shapes=(self.batch_size, self.quantization_channels))
-        init = q.enqueue_many(
-            tf.zeros((1, self.batch_size, self.quantization_channels)))
+        #TODO: velocity, problem with FIFO HERE??
+        if self.velocity_input:
+            q = tf.FIFOQueue(1, dtypes=tf.float32,shapes=(self.batch_size, 2, self.quantization_channels))
+            init = q.enqueue_many(tf.zeros((1, self.batch_size, 2, self.quantization_channels)))
+        else:
+            q = tf.FIFOQueue(
+                1,
+                dtypes=tf.float32,
+                shapes=(self.batch_size, self.quantization_channels))
+            init = q.enqueue_many(
+                tf.zeros((1, self.batch_size, self.quantization_channels)))
 
         current_state = q.dequeue()
         push = q.enqueue([current_layer])
@@ -551,14 +599,21 @@ class WaveNetModel(object):
         with tf.name_scope('dilated_stack'):
             for layer_index, dilation in enumerate(self.dilations):
                 with tf.name_scope('layer{}'.format(layer_index)):
-
-                    q = tf.FIFOQueue(
-                        dilation,
-                        dtypes=tf.float32,
-                        shapes=(self.batch_size, self.residual_channels))
-                    init = q.enqueue_many(
-                        tf.zeros((dilation, self.batch_size,
-                                  self.residual_channels)))
+                    if self.velocity_input:
+                        q = tf.FIFOQueue(
+                                dilation,
+                                dtypes=tf.float32,
+                                shapes=(self.batch_size, 2, self.residual_channels))
+                        init = q.enqueue_many(
+                                tf.zeros((dilation, self.batch_size, 2, self.residual_channels)))
+                    else:
+                        q = tf.FIFOQueue(
+                            dilation,
+                            dtypes=tf.float32,
+                            shapes=(self.batch_size, self.residual_channels))
+                        init = q.enqueue_many(
+                            tf.zeros((dilation, self.batch_size,
+                                      self.residual_channels)))
 
                     current_state = q.dequeue()
                     push = q.enqueue([current_layer])
@@ -576,8 +631,13 @@ class WaveNetModel(object):
             variables = self.variables['postprocessing']
             # Perform (+) -> ReLU -> 1x1 conv -> ReLU -> 1x1 conv to
             # postprocess the output.
-            w1 = variables['postprocess1']
-            w2 = variables['postprocess2']
+            if self.velocity_input:
+                w1 = variables['postprocess1_velocity']
+                w2 = variables['postprocess2_velocity']
+            else:
+                w1 = variables['postprocess1']
+                w2 = variables['postprocess2']
+
             if self.use_biases:
                 b1 = variables['postprocess1_bias']
                 b2 = variables['postprocess2_bias']
@@ -587,14 +647,20 @@ class WaveNetModel(object):
             total = sum(outputs)
             transformed1 = tf.nn.relu(total)
 
-            conv1 = tf.matmul(transformed1, w1[0, :, :])
+            if self.velocity_input:
+                conv1 = tf.matmul(transformed1, w1[0, :, :, :])
+            else:
+                conv1 = tf.matmul(transformed1, w1[0, :, :])
             if self.use_biases:
                 conv1 = conv1 + b1
             transformed2 = tf.nn.relu(conv1)
-            conv2 = tf.matmul(transformed2, w2[0, :, :])
+
+            if self.velocity_input:
+                conv2 = tf.matmul(transformed2, w2[0, :, :, :])
+            else:
+                conv2 = tf.matmul(transformed2, w2[0, :, :])
             if self.use_biases:
                 conv2 = conv2 + b2
-
         return conv2
 
     def _one_hot(self, input_batch):
@@ -604,7 +670,7 @@ class WaveNetModel(object):
         '''
         with tf.name_scope('one_hot_encode'):
             if self.velocity_input:
-                input_re = tf.reshape(input_batch, [self.batch_size, -1, 1])
+                input_re = tf.reshape(input_batch, [self.batch_size, -1])
                 encoded = tf.one_hot(input_re, depth=self.quantization_channels, dtype=tf.float32)
                 shape = [self.batch_size, -1, 2, self.quantization_channels]
                 encoded = tf.reshape(encoded, shape)
@@ -647,7 +713,10 @@ class WaveNetModel(object):
                                         self.global_condition_channels))
             embedding = global_condition
 
-        if embedding is not None:
+        if self.load_chord:
+            embedding = tf.reshape(
+                    embedding, [self.batch_size, -1, self.global_condition_channels])
+        elif embedding is not None and not self.load_chord:
             embedding = tf.reshape(
                 embedding,
                 [self.batch_size, 1, self.global_condition_channels])
@@ -658,25 +727,52 @@ class WaveNetModel(object):
         '''Computes the probability distribution of the next sample based on
         all samples in the input waveform.
         If you want to generate audio by feeding the output of the network back
-        as an input, see predict_proba_incremental for a faster alternative.'''
+        as an input, see predict_proba_incremental for a faster alternative.
+        Note that for non-fast generation, each time the output is feeded back as input'''
         with tf.name_scope(name):
             if self.scalar_input:
+                #TODO: may not working since first dim
                 encoded = tf.cast(waveform, tf.float32)
                 encoded = tf.reshape(encoded, [-1, 1])
+            elif self.velocity_input:
+                encoded = self._one_hot(waveform)
+                encoded = tf.reshape(encoded, [-1, 2, self.quantization_channels])
+                encoded = tf.expand_dims(encoded, 0)
             else:
                 encoded = self._one_hot(waveform)
+            #INPUT??
 
             gc_embedding = self._embed_gc(global_condition)
             raw_output = self._create_network(encoded, gc_embedding)
-            out = tf.reshape(raw_output, [-1, self.quantization_channels])
+            if self.velocity_input:
+                out = tf.reshape(raw_output, [-1, 2, self.quantization_channels])
+            else:
+                out = tf.reshape(raw_output, [-1, self.quantization_channels])
             # Cast to float64 to avoid bug in TensorFlow
-            proba = tf.cast(
-                tf.nn.softmax(tf.cast(out, tf.float64)), tf.float32)
-            last = tf.slice(
-                proba,
-                [tf.shape(proba)[0] - 1, 0],
-                [1, self.quantization_channels])
-            return tf.reshape(last, [-1])
+
+            if self.velocity_input:
+                proba_melody, proba_velocity = tf.split(out, [1,1], 1)
+                proba_melody = tf.reshape(proba_melody, [-1, self.quantization_channels])
+                proba_velocity = tf.reshape(proba_velocity, [-1, self.quantization_channels])
+                #TODO cast to tf.float64 instead?
+                proba_melody = tf.cast(tf.nn.softmax(tf.cast(proba_melody, tf.float64)), tf.float32)
+                proba_velocity = tf.cast(tf.nn.softmax(tf.cast(proba_velocity, tf.float64)), tf.float32)
+                last_m = tf.slice(
+                        proba_melody,
+                        [tf.shape(proba_melody)[0] - 1, 0],
+                        [1, self.quantization_channels])
+                last_v = tf.slice(proba_velocity,
+                        [tf.shape(proba_velocity)[0] -1, 0],
+                        [1, self.quantization_channels])
+                return tf.stack([tf.reshape(last_m, [-1]), tf.reshape(last_v, [-1])])
+            else:
+                proba = tf.cast(
+                    tf.nn.softmax(tf.cast(out, tf.float64)), tf.float32)
+                last = tf.slice(
+                    proba,
+                    [tf.shape(proba)[0] - 1, 0],
+                    [1, self.quantization_channels])
+                return tf.reshape(last, [-1])
 
     def predict_proba_incremental(self, waveform, global_condition=None,
                                   name='wavenet'):
@@ -690,21 +786,51 @@ class WaveNetModel(object):
             raise NotImplementedError("Incremental generation does not "
                                       "support scalar input yet.")
         with tf.name_scope(name):
-            encoded = tf.one_hot(waveform, self.quantization_channels)
-            encoded = tf.reshape(encoded, [-1, self.quantization_channels])
-            #TODO
             if self.velocity_input:
-                encoded = tf.cast(waveform, tf.float32)
+                #waveform: (1,2)
+                encoded = self._one_hot(waveform)
+                encoded = tf.reshape(encoded, [-1, 2, self.quantization_channels])
+            else:
+                encoded = tf.one_hot(waveform, self.quantization_channels, dtype=tf.float32)
+                encoded = tf.reshape(encoded, [-1, self.quantization_channels])
             gc_embedding = self._embed_gc(global_condition)
             raw_output = self._create_generator(encoded, gc_embedding)
-            out = tf.reshape(raw_output, [-1, self.quantization_channels])
-            proba = tf.cast(
-                tf.nn.softmax(tf.cast(out, tf.float64)), tf.float32)
-            last = tf.slice(
-                proba,
-                [tf.shape(proba)[0] - 1, 0],
-                [1, self.quantization_channels])
-            return tf.reshape(last, [-1])
+            if self.velocity_input:
+                out = tf.reshape(raw_output, [-1, 2, self.quantization_channels])
+            else:
+                out = tf.reshape(raw_output, [-1, self.quantization_channels])
+
+            if self.velocity_input:
+                proba_melody, proba_velocity = tf.split(out, [1, 1], 1)
+                proba_melody = tf.reshape(proba_melody, [-1, self.quantization_channels])
+                proba_velocity = tf.reshape(proba_velocity, [-1, self.quantization_channels])
+                proba_melody = tf.cast(tf.nn.softmax(tf.cast(proba_melody, tf.float64)), tf.float64)
+                proba_velocity = tf.cast(tf.nn.softmax(tf.cast(proba_velocity, tf.float64)), tf.float64)
+            else:
+                proba = tf.cast(
+                    tf.nn.softmax(tf.cast(out, tf.float64)), tf.float32)
+
+            #TODO: ORDER OF SOFTMAX??
+            if self.velocity_input:
+                last_m = tf.slice(
+                        proba_melody,
+                        [tf.shape(proba_melody)[0] - 1, 0],
+                        [1, self.quantization_channels])
+                last_v = tf.slice(
+                        proba_velocity,
+                        [tf.shape(proba_velocity)[0] - 1, 0],
+                        [1, self.quantization_channels])
+            else:
+                last = tf.slice(
+                        proba,
+                        [tf.shape(proba)[0] - 1, 0],
+                        [1, self.quantization_channels])
+
+            if self.velocity_input:
+                #TODO velocity (2, 128)
+                return tf.stack([tf.reshape(last_m, [-1]), tf.reshape(last_v, [-1])])
+            else:
+                return tf.reshape(last, [-1])
 
     def loss(self,
              input_batch,
@@ -740,8 +866,10 @@ class WaveNetModel(object):
             else:
                 network_input = tf.slice(network_input, [0, 0, 0],
                                      [-1, network_input_width, -1])
+            gc_embedding = tf.slice(gc_embedding, [0, 0, 0], [-1, network_input_width, -1])
 
             raw_output = self._create_network(network_input, gc_embedding)
+
             #TODO velocity HERE!!
             with tf.name_scope('loss'):
                 # Cut off the samples corresponding to the receptive field
@@ -750,8 +878,7 @@ class WaveNetModel(object):
                     target_output = tf.slice(
                             tf.reshape(
                                 encoded,
-                                [self.batch_size, -1, 2, self.quantization_channels]
-                                ),
+                                [self.batch_size, -1, 2, self.quantization_channels]),
                             [0, self.receptive_field, 0, 0],
                             [-1, -1, -1, -1])
                 else:
@@ -761,14 +888,34 @@ class WaveNetModel(object):
                                 [self.batch_size, -1, self.quantization_channels]),
                             [0, self.receptive_field, 0],
                             [-1, -1, -1])
-                target_output = tf.reshape(target_output,
+
+                if self.velocity_input:
+                    #TODO seperate velocity and melody
+                    raw_output = tf.reshape(raw_output, [self.batch_size, -1, 2, self.quantization_channels])
+                    target_output_list = tf.unstack(target_output, axis=2)
+                    target_output_melody = target_output_list[0]
+                    target_output_velocity = target_output_list[1]
+                    prediction_list = tf.unstack(raw_output, axis=2)
+                    prediction_melody = prediction_list[0]
+                    prediction_velocity = prediction_list[1]
+                else:
+                    target_output = tf.reshape(target_output,
                                            [-1, self.quantization_channels])
-                prediction = tf.reshape(raw_output,
+                    prediction = tf.reshape(raw_output,
                                         [-1, self.quantization_channels])
-                loss = tf.nn.softmax_cross_entropy_with_logits(
-                    logits=prediction,
-                    labels=target_output)
-                reduced_loss = tf.reduce_mean(loss)
+
+                if self.velocity_input:
+                    loss_melody = tf.nn.softmax_cross_entropy_with_logits(
+                            logits=prediction_melody, labels=target_output_melody)
+                    loss_velocity = tf.nn.softmax_cross_entropy_with_logits(
+                            logits=prediction_velocity, labels=target_output_velocity)
+                    reduced_loss = 0.999*tf.reduce_mean(loss_melody) + 0.001*tf.reduce_mean(loss_velocity)
+
+                else:
+                    loss = tf.nn.softmax_cross_entropy_with_logits(
+                            logits=prediction,
+                            labels=target_output)
+                    reduced_loss = tf.reduce_mean(loss)
 
                 tf.summary.scalar('loss', reduced_loss)
 

@@ -67,13 +67,14 @@ def causal_conv(value, filter_, dilation, velocity_input=False, name='causal_con
             else:
                 transformed = time_to_batch(value, dilation)
                 conv = tf.nn.conv1d(transformed, filter_, stride=1,
-                                padding='VALID')
+                                padding='SAME')
                 restored = batch_to_time(conv, dilation)
         else:
             if velocity_input:
                 restored = tf.nn.conv2d(value, filter_, strides=[1,1,1,1], padding='VALID')
             else:
-                restored = tf.nn.conv1d(value, filter_, stride=1, padding='VALID')
+                #padding to same!!
+                restored = tf.nn.conv1d(value, filter_, stride=1, padding='SAME')
         # Remove excess elements at the end.
         out_width = tf.shape(value)[1] - (filter_width - 1) * dilation
         if velocity_input:

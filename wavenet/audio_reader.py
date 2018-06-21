@@ -42,7 +42,7 @@ def find_files(directory, pattern='*.mid'):
     return files
 
 
-def load_generic_audio(directory, sample_rate, load_velocity=False):
+def load_generic_audio(directory, sample_rate, load_velocity=False, load_chord=False):
     '''Generator that yields audio waveforms from the directory.'''
     files = find_files(directory)
     id_reg_exp = re.compile(FILE_PATTERN)
@@ -59,14 +59,35 @@ def load_generic_audio(directory, sample_rate, load_velocity=False):
             category_id = int(ids[0][0])
 
         midi = pretty_midi.PrettyMIDI(filename)
+        melody_instrument = midi.instruments[0]
+
+        if load_chord:
+            chord_instrument = midi.instruments[-1]
+            midi.instruments = [chord_instrument]
+            chord = midi.get_piano_roll(fs = sample_rate, times = None)
+            chord = np.swapaxes(chord, 0, 1)
+            chord = np.argmax(chord, axis=-1)
+            chord = np.reshape(chord, (-1, 1))
+            category_id = chord
+
+        midi.instruments = [melody_instrument]
         midi = midi.get_piano_roll(fs = sample_rate, times = None)
         midi = np.swapaxes(midi, 0, 1)
         midi = np.argmax(midi, axis = -1)
         #TODO: not sure
         midi = np.reshape(midi, (-1, 1))
+        if load_chord:
+            cut_length = min(midi.shape[0], category_id.shape[0])
+            category_id = category_id[:cut_length, :]
+            midi = midi[:cut_length, :]
+
         if load_velocity:
             velocity = load_audio_velocity(filename, sample_rate)
             midi = np.concatenate((midi, velocity), axis=1)
+
+        if load_velocity and load_chord:
+            print("Carefull!!! Not supported yet!")
+            assert False
         #audio, _ = librosa.load(filename, sr=sample_rate, mono=True)
         #audio = audio.reshape(-1, 1)
         yield midi, filename, category_id
@@ -82,8 +103,8 @@ def load_audio_velocity(filename, sample_rate):
     notes = pm.instruments[0].notes
     fs = 1.0/sample_rate
     for n in notes:
-        start_idx = int(n.start/fs) + 1
-        end_idx = int(n.end/fs) + 1
+        start_idx = int(n.start/fs)
+        end_idx = int(n.end/fs)
         velocity[start_idx: end_idx, 0] = n.velocity
     return velocity
 
@@ -120,6 +141,7 @@ class AudioReader(object):
                  sample_rate,
                  gc_enabled,
                  load_velocity,
+                 load_chord,
                  receptive_field,
                  sample_size=None,
                  silence_threshold=None,
@@ -134,13 +156,18 @@ class AudioReader(object):
         self.threads = []
         self.sample_placeholder = tf.placeholder(dtype=tf.float32, shape=None)
         self.load_velocity = load_velocity
+        self.load_chord = load_chord
         if self.load_velocity:
             self.queue = tf.PaddingFIFOQueue(queue_size, ['float32'], shapes=[(None, 2)])
         else:
             self.queue = tf.PaddingFIFOQueue(queue_size, ['float32'], shapes=[(None, 1)])
         self.enqueue = self.queue.enqueue([self.sample_placeholder])
 
-        if self.gc_enabled:
+        if self.load_chord:
+            self.id_placeholder = tf.placeholder(dtype=tf.int32, shape=None)
+            self.gc_queue = tf.PaddingFIFOQueue(queue_size, ['int32'], shapes=[(None, 1)])
+            self.gc_enqueue = self.gc_queue.enqueue([self.id_placeholder])
+        elif self.gc_enabled and not self.load_chord:
             self.id_placeholder = tf.placeholder(dtype=tf.int32, shape=())
             self.gc_queue = tf.PaddingFIFOQueue(queue_size, ['int32'],
                                                 shapes=[()])
@@ -152,12 +179,12 @@ class AudioReader(object):
         files = find_files(audio_dir)
         if not files:
             raise ValueError("No audio files found in '{}'.".format(audio_dir))
-        if self.gc_enabled and not_all_have_id(files):
+        if self.gc_enabled and not_all_have_id(files) and not self.load_chord:
             raise ValueError("Global conditioning is enabled, but file names "
                              "do not conform to pattern having id.")
         # Determine the number of mutually-exclusive categories we will
         # accomodate in our embedding table.
-        if self.gc_enabled:
+        if self.gc_enabled and not self.load_chord:
             _, self.gc_category_cardinality = get_category_cardinality(files)
             # Add one to the largest index to get the number of categories,
             # since tf.nn.embedding_lookup expects zero-indexing. This
@@ -183,7 +210,7 @@ class AudioReader(object):
         stop = False
         # Go through the dataset multiple times
         while not stop:
-            iterator = load_generic_audio(self.audio_dir, self.sample_rate, self.load_velocity)
+            iterator = load_generic_audio(self.audio_dir, self.sample_rate, self.load_velocity, self.load_chord)
             for audio, filename, category_id in iterator:
                 if self.coord.should_stop():
                     stop = True
@@ -198,9 +225,12 @@ class AudioReader(object):
                               "silence. Consider decreasing trim_silence "
                               "threshold, or adjust volume of the audio."
                               .format(filename))
-
+                #velocity included and padded
                 audio = np.pad(audio, [[self.receptive_field, 0], [0, 0]],
                                'constant')
+                #chord padding
+                if self.load_chord:
+                    category_id = np.pad(category_id, [[self.receptive_field, 0], [0, 0]], 'constant')
 
                 if self.sample_size:
                     # Cut samples into pieces of size receptive_field +
@@ -211,9 +241,15 @@ class AudioReader(object):
                         sess.run(self.enqueue,
                                  feed_dict={self.sample_placeholder: piece})
                         audio = audio[self.sample_size:, :]
-                        if self.gc_enabled:
+
+                        if self.gc_enabled and self.load_chord:
+                            category_id_piece = category_id[:(self.receptive_field+self.sample_size), :]
                             sess.run(self.gc_enqueue, feed_dict={
-                                self.id_placeholder: category_id})
+                                self.id_placeholder: category_id_piece})
+                            category_id = category_id[self.sample_size:, :]
+                        elif self.gc_enabled:
+                            sess.run(self.gc_enqueue, feed_dict={self.id_placeholder: category_id})
+
                 else:
                     sess.run(self.enqueue,
                              feed_dict={self.sample_placeholder: audio})

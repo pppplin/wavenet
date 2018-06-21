@@ -26,8 +26,8 @@ BATCH_SIZE = 2 #1
 DATA_DIRECTORY = './VCTK-Corpus/wav48/p225'
 LOGDIR_ROOT = './logdir'
 CHECKPOINT_EVERY = 50
-NUM_STEPS = int(300)
-LEARNING_RATE = 1e-3
+NUM_STEPS = int(3000)
+LEARNING_RATE = 1e-6 #1e-3
 WAVENET_PARAMS = './wavenet_params.json'
 STARTED_DATESTRING = "{0:%Y-%m-%dT%H-%M-%S}".format(datetime.now())
 SAMPLE_SIZE = 80000 #100k
@@ -97,8 +97,7 @@ def get_arguments():
                         help='Select the optimizer specified by this option. Default: adam.')
     parser.add_argument('--momentum', type=float,
                         default=MOMENTUM, help='Specify the momentum to be '
-                        'used by sgd or rmsprop optimizer. Ignored by the '
-                        'adam optimizer. Default: ' + str(MOMENTUM) + '.')
+                        'used by sgd or rmsprop optimizer. Ignored by the adam optimizer. Default: ' + str(MOMENTUM) + '.')
     parser.add_argument('--histograms', type=_str_to_bool, default=True,
                         help='Whether to store histogram summaries. Default: False')
     parser.add_argument('--gc_channels', type=int, default=None,
@@ -108,6 +107,8 @@ def get_arguments():
                              + str(MAX_TO_KEEP) + '.')
     parser.add_argument('--early_stop', type=_str_to_bool, default=False, help='Wherther to use validate set to early stop.')
     parser.add_argument('--load_velocity', type=_str_to_bool, default=False, help='Whether to include velocity in training.(midi only)')
+    parser.add_argument('--load_chord', type=_str_to_bool, default=False, help='Whether to include chord in training.(midi only)')
+    parser.add_argument('--gc_cardinality', type=int, default=None, help='Provided manually, instead of calculate from AudioReader. (for chord)')
     return parser.parse_args()
 
 
@@ -136,6 +137,7 @@ def load(saver, sess, logdir):
                           .split('-')[-1])
         print("  Global step was: {}".format(global_step))
         print("  Restoring...", end="")
+        #saver.restore(sess, "./logdir/jazz/train/2018-05-09T17-24-20/model.ckpt-1400")
         saver.restore(sess, ckpt.model_checkpoint_path)
         print(" Done.")
         return global_step
@@ -227,6 +229,7 @@ def main():
             sample_rate=wavenet_params['sample_rate'],
             gc_enabled=gc_enabled,
             load_velocity=args.load_velocity,
+            load_chord=args.load_chord,
             receptive_field=WaveNetModel.calculate_receptive_field(wavenet_params["filter_width"],
                                                                    wavenet_params["dilations"],
                                                                    wavenet_params["scalar_input"],
@@ -254,8 +257,10 @@ def main():
         midi_input=wavenet_params["midi_input"],
         initial_filter_width=wavenet_params["initial_filter_width"],
         histograms=args.histograms,
+        load_chord=args.load_chord,
         global_condition_channels=args.gc_channels,
-        global_condition_cardinality=reader.gc_category_cardinality)
+        global_condition_cardinality=args.gc_cardinality)
+        #global_condition_cardinality=reader.gc_category_cardinality)
 
     if args.l2_regularization_strength == 0:
         args.l2_regularization_strength = None
@@ -300,6 +305,7 @@ def main():
 
     step = None
     last_saved_step = saved_global_step
+    total_loss = 0
     try:
         for step in range(saved_global_step + 1, args.num_steps):
             start_time = time.time()
@@ -324,12 +330,16 @@ def main():
                 writer.add_summary(summary, step)
 
             duration = time.time() - start_time
+            total_loss += loss_value
             print('step {:d} - loss = {:.3f}, ({:.3f} sec/step)'
                   .format(step, loss_value, duration))
 
             if step % args.checkpoint_every == 0:
                 save(saver, sess, logdir, step)
                 last_saved_step = step
+
+        #total_loss = total_loss/50
+        #print("avg loss is: ", total_loss)
 
     except KeyboardInterrupt:
         # Introduce a line break after ^C is displayed so save message
