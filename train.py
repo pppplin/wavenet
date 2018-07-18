@@ -26,7 +26,7 @@ BATCH_SIZE = 2 #1
 DATA_DIRECTORY = './VCTK-Corpus/wav48/p225'
 LOGDIR_ROOT = './logdir'
 CHECKPOINT_EVERY = 50
-NUM_STEPS = int(7000)
+NUM_STEPS = int(4000)
 LEARNING_RATE = 1e-5 #1e-3
 WAVENET_PARAMS = './wavenet_params.json'
 STARTED_DATESTRING = "{0:%Y-%m-%dT%H-%M-%S}".format(datetime.now())
@@ -108,7 +108,11 @@ def get_arguments():
     parser.add_argument('--early_stop', type=_str_to_bool, default=False, help='Wherther to use validate set to early stop.')
     parser.add_argument('--load_velocity', type=_str_to_bool, default=False, help='Whether to include velocity in training.(midi only)')
     parser.add_argument('--load_chord', type=_str_to_bool, default=False, help='Whether to include chord in training.(midi only)')
+    parser.add_argument('--chain_mel', type=_str_to_bool, default=False, help='Chain melody.')
+    parser.add_argument('--chain_vel', type=_str_to_bool, default=False, help='Chain velocity.')
     parser.add_argument('--gc_cardinality', type=int, default=None, help='Provided manually, instead of calculate from AudioReader. (for chord)')
+    parser.add_argument('--condition_restriction', type=int, default=None, help='Provided manually, for chord conditioning')
+    parser.add_argument('--lc_channels', type=int, default=None, help='Number of local condition channels.')
     return parser.parse_args()
 
 
@@ -216,6 +220,7 @@ def main():
     # Create coordinator.
     coord = tf.train.Coordinator()
 
+    lc_enabled = False if args.lc_channels is None else True
     # Load raw waveform from VCTK corpus.
     with tf.name_scope('create_inputs'):
         # Allow silence trimming to be skipped by specifying a threshold near
@@ -227,9 +232,13 @@ def main():
             args.data_dir,
             coord,
             sample_rate=wavenet_params['sample_rate'],
+            local_sample_rate=wavenet_params['local_sample_rate'],
             gc_enabled=gc_enabled,
+            lc_enabled=lc_enabled,
             load_velocity=args.load_velocity,
             load_chord=args.load_chord,
+            chain_mel=args.chain_mel,
+            chain_vel=args.chain_vel,
             receptive_field=WaveNetModel.calculate_receptive_field(wavenet_params["filter_width"],
                                                                    wavenet_params["dilations"],
                                                                    wavenet_params["scalar_input"],
@@ -242,6 +251,7 @@ def main():
         else:
             gc_id_batch = None
 
+    local_upsample_rate = wavenet_params["sample_rate"]/wavenet_params["local_sample_rate"]
     # Create network.
     net = WaveNetModel(
         batch_size=args.batch_size,
@@ -259,7 +269,12 @@ def main():
         histograms=args.histograms,
         load_chord=args.load_chord,
         global_condition_channels=args.gc_channels,
-        global_condition_cardinality=args.gc_cardinality)
+        global_condition_cardinality=args.gc_cardinality,
+        local_condition_channels=args.lc_channels,
+        local_upsample_rate=local_upsample_rate,
+        condition_restriction=args.condition_restriction,
+        chain_mel=args.chain_mel,
+        chain_vel=args.chain_vel)
         #global_condition_cardinality=reader.gc_category_cardinality)
 
     if args.l2_regularization_strength == 0:

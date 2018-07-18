@@ -13,6 +13,7 @@ import tensorflow as tf
 from wavenet import WaveNetModel, mu_law_decode, mu_law_encode, audio_reader
 from wavenet.audio_reader import load_audio_velocity
 from reverse_pianoroll import array_to_pretty_midi, array_to_pretty_midi_velocity
+from scipy.stats import entropy
 
 from gpu import define_gpu
 import pretty_midi
@@ -107,9 +108,14 @@ def get_arguments():
         type=int,
         default=None,
         help='ID of category to generate, if globally conditioned.')
+    parser.add_argument('--condition_restriction', type=int, default=None, help='Provided manually, for chord conditioning')
     parser.add_argument('--load_velocity', type=_str_to_bool, default=False, help='Whether to include velocity in training.')
     parser.add_argument('--midi_input', type=_str_to_bool, default=True)
     parser.add_argument('--load_chord', type=_str_to_bool, default=False, help='Whether to include chord in training.(midi only)')
+    parser.add_argument('--chain_mel', type=_str_to_bool, default=False, help='Chain melody.')
+    parser.add_argument('--chain_vel', type=_str_to_bool, default=False, help='Chain velocity.')
+    parser.add_argument('--init_chain', type=_str_to_bool, default=False, help='Initialize chain: all vel to 100, produce mel')
+    parser.add_argument('--lc_channels', type=int, default=None, help='Number of local condition channels.')
     arguments = parser.parse_args()
     if arguments.gc_channels is not None:
         if arguments.gc_cardinality is None:
@@ -117,7 +123,7 @@ def get_arguments():
                              "specified. Use --gc_cardinality=377 for full "
                              "VCTK corpus.")
 
-        if arguments.gc_id is None and not arguments.load_chord:
+        if arguments.gc_id is None and (not (arguments.load_chord or arguments.chain_mel or arguments.chain_vel)):
             raise ValueError("Globally conditioning, but global condition was "
                               "not specified. Use --gc_id to specify global "
                               "condition.")
@@ -130,28 +136,17 @@ def write_wav(waveform, sample_rate, filename):
     librosa.output.write_wav(filename, y, sample_rate)
     print('Updated wav file at {}'.format(filename))
 
-def convert_to_mid(array, sample_rate, filename, velocity, op):
+def convert_to_mid(array, sample_rate, filename, op, velocity=False, chain_mel=False, chain_vel=False):
     """
     array: np.ndarray, shape = (?, 1), directed generated array
     save as midi file
     """
     arr = np.asarray(array)
-    if velocity:
+    if chain_vel:
+        arr[[0, 1]] = arr[[1, 0]]
+    print(arr, arr.shape)
+    if velocity or chain_mel or chain_vel:
         mid = array_to_pretty_midi_velocity(arr, fs = sample_rate, op=op)
-        #mid_mel = array_to_pretty_midi(arr[:, 0], fs = sample_rate, op=op)
-        #temp_ls = filename.split('/')
-        #mel_file_name = ''
-        #for i in range(len(temp_ls)):
-        #    if (i==(len(temp_ls)-1)):
-        #        mel_file_name += 'mel_'
-        #        mel_file_name += temp_ls[i]
-        #    elif (i==(len(temp_ls)-2)):
-        #        mel_file_name += temp_ls[i]
-        #        mel_file_name += '_mel_only/'
-        #    else:
-        #        mel_file_name += temp_ls[i]
-        #        mel_file_name += "/"
-        #mid_mel.write(mel_file_name)
     else:
         mid = array_to_pretty_midi(arr, fs = sample_rate, op = op)
     mid.write(filename)
@@ -171,45 +166,71 @@ def create_seed(filename,
 
     return quantized[:cut_index]
 
-def create_midi_seed(filename,
-                     samples_num,
-                     sample_rate,
-                     quantization_channels,
-                     window_size,
-                     silence_threshold=SILENCE_THRESHOLD, velocity = False, chord = False):
-    midi = pretty_midi.PrettyMIDI(filename)
-    midi.instruments = [midi.instruments[0]]
-    midi = midi.get_piano_roll(fs = sample_rate, times = None)
-
+def create_midi_seed(filename, samples_num, sample_rate, quantization_channels, window_size,
+        silence_threshold=SILENCE_THRESHOLD, local_sample_rate=None, use_velocity=False,
+        use_chord=False, chain_mel=False, chain_vel=False, init=False):
+    pm = pretty_midi.PrettyMIDI(filename)
+    mel_instrument = [pm.instruments[0]]
+    chord_instrument = [pm.instruments[2]]
+    if chain_vel:
+        cont_instrument = [pm.instruments[-1]]
+    pm.instruments = mel_instrument
+    midi = pm.get_piano_roll(fs=sample_rate, times=None)
     midi = np.swapaxes(midi, 0, 1)
-    midi = np.argmax(midi, axis = -1)
-    #TODO
+    midi = np.argmax(midi, axis=-1)
+    midi = np.reshape(midi, (-1, 1))
     midi = midi.astype(np.float32)
+    velocity = load_audio_velocity(filename, sample_rate, chain_vel=chain_vel)
+    velocity = np.reshape(velocity, (-1, 1))
+    pm.instruments = chord_instrument
+    chords = pm.get_piano_roll(fs=sample_rate, times=None)
+    chords = np.swapaxes(chords, 0, 1)
+    chords = np.argmax(chords, axis=-1)
+    chords = np.reshape(chords, (-1, 1))
+    midi_size = np.size(midi)
+    if init:
+        vel_init = np.asarray([90]*(np.size(chords)-midi_size))
+        vel_init = np.reshape(vel_init, (-1, 1))
+        velocity = np.concatenate((velocity, vel_init), axis=0)
+    #chords = chords[:min_len]
     cut_index = np.size(midi) if np.size(midi)<window_size else window_size
-    if velocity:
-        midi = np.reshape(midi, (-1, 1))
-        velocity = load_audio_velocity(filename, sample_rate)
-        midi = np.concatenate((midi, velocity), axis=1)
-    #quantized = mu_law_encode(midi, quantization_channels)
-    #cut_index = np.size(midi) if np.size(midi)<tf.constant(window_size) else tf.constant(window_size)
-    #cut_index = tf.cond(tf.constant(midi.size) < tf.constant(window_size),
-    #                    lambda: tf.constant(midi.size),
-    #                    lambda: tf.constant(window_size))
-    if chord:
+    if use_velocity:
+        prod = np.concatenate((midi, velocity), axis=1)
+        return tf.stack(prod[:cut_index])
+    if use_chord:
+        chords_1 = chords[cut_index: cut_index+samples_num]
+        prod = np.concatenate((midi, chords), axis=1)
+        return tf.stack(prod[:cut_index]), chords_1
+    if chain_mel:
+        prod = np.concatenate((midi, velocity[:midi_size], chords[:midi_size]), axis=1)
+        cond = np.concatenate((velocity, chords), axis=1)
+        return tf.stack(prod[:cut_index]), cond[cut_index: cut_index+samples_num, :]
+    if chain_vel:
+        pm.instruments = cont_instrument
+        cont_midi = pm.get_piano_roll(fs=sample_rate, times=None)
+        cont_midi = np.reshape(np.argmax(np.swapaxes(cont_midi, 0, 1), axis=-1), (-1, 1))
+        cont_cut_index = min(np.size(chords), np.size(cont_midi))
+        prod = np.concatenate((velocity[:midi_size], midi, chords[:midi_size]), axis=1)
+        cond = np.concatenate((cont_midi[:cont_cut_index], chords[:cont_cut_index]), axis=1)
+        return tf.stack(prod[:cut_index]), cond[cut_index: cut_index+samples_num, :]
+    if local_sample_rate:
+        #TODO stack!!
+        raise ValueError("stack not working for local condition")
         cmidi = pretty_midi.PrettyMIDI(filename)
         cmidi.instruments = [cmidi.instruments[-1]]
-        chords = cmidi.get_piano_roll(fs = sample_rate, times = None)
+        chords = cmidi.get_piano_roll(fs = local_sample_rate, times = None)
         chords = np.swapaxes(chords, 0, 1)
         chords = np.argmax(chords, axis=-1)
-        chords_0 = chords[:midi.shape[0]]
-        chords_1 = chords[cut_index: cut_index+samples_num]
+        rate = sample_rate/local_sample_rate
+        chords_0 = chords[:midi.shape[0]/rate]
+        chords_1 = chords[cut_index/rate: cut_index/rate+samples_num]
         midi = np.reshape(midi, (-1, 1))
         chords_0 = np.reshape(chords_0, (-1, 1))
         chords_1 = np.reshape(chords_1, (-1, 1))
-        midi = np.concatenate((midi, chords_0), axis = 1)
+        midi = np.concatenate((midi, chords_0), axis=1)
         return tf.stack(midi[:cut_index]), chords_1
-    return tf.stack(midi[:cut_index])
 
+    return tf.stack(midi[:cut_index])
 
 def main():
     args = get_arguments()
@@ -219,7 +240,7 @@ def main():
         wavenet_params = json.load(config_file)
 
     sess = tf.Session()
-
+    local_upsample_rate = wavenet_params["sample_rate"]/wavenet_params["local_sample_rate"]
     net = WaveNetModel(
         batch_size=1,
         dilations=wavenet_params['dilations'],
@@ -235,14 +256,20 @@ def main():
         initial_filter_width=wavenet_params['initial_filter_width'],
         load_chord=args.load_chord,
         global_condition_channels=args.gc_channels,
-        global_condition_cardinality=args.gc_cardinality)
+        global_condition_cardinality=args.gc_cardinality,
+        local_condition_channels=args.lc_channels,
+        local_upsample_rate=local_upsample_rate,
+        condition_restriction=args.condition_restriction,
+        chain_mel=args.chain_mel,
+        chain_vel=args.chain_vel)
 
     samples = tf.placeholder(tf.int32)
 
-    if args.load_chord:
+    if args.load_chord or args.chain_mel or args.chain_vel:
         #use fast generation as default
-        chords = tf.placeholder(tf.int32)
-        next_sample = net.predict_proba_incremental(samples, chords)
+        #TODO: placeholder size?
+        global_cond = tf.placeholder(tf.int32)
+        next_sample = net.predict_proba_incremental(samples, global_cond)
     elif args.fast_generation:
         next_sample = net.predict_proba_incremental(samples, args.gc_id)
     else:
@@ -273,15 +300,16 @@ def main():
                             wavenet_params['sample_rate'],
                             quantization_channels,
                             net.receptive_field)
-        elif args.load_chord:
-            seed, chords_cont = create_midi_seed(args.wav_seed,
-                                        args.samples,
-                                        wavenet_params['sample_rate'],
-                                        quantization_channels,
-                                        net.receptive_field,
-                                        velocity = args.load_velocity,
-                                        chord = args.load_chord)
+        elif args.load_chord or args.chain_mel or args.chain_vel:
+            seed, cond_cont = create_midi_seed(args.wav_seed, args.samples,
+                    wavenet_params['sample_rate'], quantization_channels,
+                    net.receptive_field, use_velocity=args.load_velocity,
+                    use_chord=args.load_chord, chain_mel=args.chain_mel, chain_vel=args.chain_vel, init=args.init_chain)
+        elif local_upsample_rate:
+            raise ValueError("Not implemented yet")
+            #TODO add a local variable, dont use sample rate
         else:
+            raise ValueError("Not implemented yet")
             seed = create_midi_seed(args.wav_seed,
                             args.samples,
                             wavenet_params['sample_rate'],
@@ -297,7 +325,7 @@ def main():
             sample_min = np.min(wave_array[:, 0])
             velocity_max = np.max(wave_array[:, 1])
             velocity_min = np.min(wave_array[:, 1])
-        elif args.load_chord:
+        elif args.load_chord or args.chain_mel or args.chain_vel:
             wave_array = np.asarray(waveform)
             sample_max = np.max(wave_array[:, 0])
             sample_min = np.min(wave_array[:, 0])
@@ -324,17 +352,20 @@ def main():
             if args.load_velocity or args.load_chord:
                 x = np.asarray(x)
                 x = np.reshape(x, (-1, 2))
-
+            elif args.chain_mel or args.chain_vel:
+                x = np.asarray(x)
+                x = np.reshape(x, (-1, 3))
             if i % 100 == 0:
                 print('Priming sample {}'.format(i))
-            if args.load_chord:
-                #load chord from waveform
-                sess.run(outputs, feed_dict={samples: x[:, 0], chords: x[:, 1]})
+            if args.load_chord or args.chain_mel or args.chain_vel:
+                #load global condition from waveform
+                sess.run(outputs, feed_dict={samples: x[:, 0], global_cond: x[:, 1:]})
             else:
                 sess.run(outputs, feed_dict={samples: x})
         print('Done.')
 
     last_sample_timestamp = datetime.now()
+    #TODO chain
     for step in range(args.samples):
         if args.fast_generation:
             outputs = [next_sample]
@@ -348,12 +379,12 @@ def main():
             outputs = [next_sample]
 
         # Run the WaveNet to predict the next sample.
-        if args.load_chord:
-            prediction = sess.run(outputs, feed_dict={samples: window[0], chords: window[1]})[0]
+        if args.load_chord or args.chain_mel or args.chain_vel:
+            prediction = sess.run(outputs, feed_dict={samples: window[0], global_cond: window[1:]})[0]
         else:
             prediction = sess.run(outputs, feed_dict={samples: window})[0]
 
-        # Velocity outputs get some negligible error,  renormalized!
+        '''Velocity outputs get some negligible error, renormalized!'''
         #TODO velocity assume np.log and else working
         # Scale prediction distribution using temperature. If temperature==1, scale_prediction==prediction.
         np.seterr(divide='ignore')
@@ -370,19 +401,18 @@ def main():
                     prediction, scaled_prediction, atol=1e-5,
                     err_msg='Prediction scaling at temperature=1.0 '
                             'is not working as intended.')
-
         if args.load_velocity:
             sample_melody = np.random.choice(np.arange(quantization_channels), p=prediction[0])
             sample_velocity = np.random.choice(np.arange(quantization_channels), p=prediction[1])
         else:
             sample = np.random.choice(np.arange(quantization_channels), p=scaled_prediction)
 
-        if args.wav_seed is None:
+        sample = sample_max if sample>sample_max else sample
+        sample = sample_min if sample<sample_min else sample
+        if not (args.load_velocity or args.load_chord or args.chain_mel or args.chain_vel):
             waveform.append(sample)
-        elif args.wav_seed and not args.load_velocity and not args.load_chord and sample>=sample_min and sample<=sample_max:
-            waveform.append(sample)
-        elif args.wav_seed and args.load_chord and sample>=sample_min and sample<=sample_max:
-            waveform.append([sample, chords_cont[step]])
+        elif args.wav_seed and (args.load_chord or args.chain_mel or args.chain_vel):
+            waveform.append([sample, cond_cont[step][0], cond_cont[step][1]])
         elif args.load_velocity:
             #TODO ONLY FOR TESTING
             if sample_melody>=sample_min and sample_melody<=sample_max \
@@ -402,7 +432,7 @@ def main():
         #TODO
         if (args.mid_out_path and args.save_every and
                 (step + 1) % args.save_every == 0):
-            assert False
+            raise ValueError("Not implemented for velocity, chord and chain.")
             #TODO: not implemented for velocity and chords
             out = sess.run(decode, feed_dict={samples: waveform})
             convert_to_mid(out, sample_rate, args.mid_out_path, args.load_velocity)
@@ -422,21 +452,19 @@ def main():
     #TODO
     #waveform = np.reshape(waveform, [-1, 1])
     if args.mid_out_path:
-        #out = sess.run(decode, feed_dict={samples: waveform})
-        #TODO
-        #out = sess.run(decode, feed_dict={samples: waveform})
-        #print(tf.shape(decode))
         if args.load_velocity:
             out = np.reshape(waveform, (-1, 2))
         elif args.load_chord:
             out = np.reshape(waveform, (-1, 2))
             out = np.reshape(out[:, 0], (-1, 1))
+        elif args.chain_mel or args.chain_vel:
+            out = np.reshape(waveform, (-1, 3))[:, :2]
         else:
             out = np.reshape(waveform, (-1, 1))
-        convert_to_mid(out, sample_rate, args.mid_out_path, args.load_velocity, args.wav_seed)
+        convert_to_mid(out, sample_rate, args.mid_out_path, args.wav_seed,
+                args.load_velocity, args.chain_mel, args.chain_vel)
 
     print('Finished generating. The result can be viewed in TensorBoard.')
-
 
 if __name__ == '__main__':
     main()

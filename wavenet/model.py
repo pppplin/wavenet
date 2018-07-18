@@ -57,8 +57,13 @@ class WaveNetModel(object):
                  initial_filter_width=32,
                  histograms=False,
                  load_chord=False,
+                 chain_mel=False,
+                 chain_vel=False,
                  global_condition_channels=None,
-                 global_condition_cardinality=None):
+                 global_condition_cardinality=None,
+                 local_condition_channels=None,
+                 local_upsample_rate=None,
+                 condition_restriction=None):
         '''Initializes the WaveNet model.
 
         Args:
@@ -80,7 +85,6 @@ class WaveNetModel(object):
             scalar_input: Whether to use the quantized waveform directly as
                 input to the network instead of one-hot encoding it.
                 Default: False.
-            #TODO
             velocity_input: Whether to include velocity in input. Default False
             initial_filter_width: The width of the initial filter of the
                 convolution applied to the scalar input. This is only relevant
@@ -113,8 +117,12 @@ class WaveNetModel(object):
         self.histograms = histograms
         self.global_condition_channels = global_condition_channels
         self.global_condition_cardinality = global_condition_cardinality
+        self.local_condition_channels = local_condition_channels
+        self.local_upsample_rate = local_upsample_rate
         self.load_chord = load_chord
-
+        self.chain_mel = chain_mel
+        self.chain_vel = chain_vel
+        self.condition_restriction = condition_restriction
         self.receptive_field = WaveNetModel.calculate_receptive_field(
             self.filter_width, self.dilations, self.scalar_input,
             self.initial_filter_width)
@@ -145,13 +153,16 @@ class WaveNetModel(object):
                 # given to us and we don't need to do the embedding lookup.
                 # Still another alternative is no global condition at all, in
                 # which case we also don't do a tf.nn.embedding_lookup.
-                #CONDITION!
                 with tf.variable_scope('embeddings'):
                     layer = dict()
                     layer['gc_embedding'] = create_embedding_table(
                         'gc_embedding',
                         [self.global_condition_cardinality,
                          self.global_condition_channels])
+                    if self.local_condition_channels is not None:
+                        layer['lc_embedding'] = create_variable('lc_embedding', [1, 1, self.local_condition_channels, 1])
+                    layer['gc_vel'] = create_embedding_table('gc_vel', [128, self.global_condition_channels])
+                    layer['gc_pitch'] = create_embedding_table('gc_pitch', [128, self.global_condition_channels])
                     var['embeddings'] = layer
 
             with tf.variable_scope('causal_layer'):
@@ -333,15 +344,16 @@ class WaveNetModel(object):
                 cut_width = tf.shape(conv_filter)[1]
                 global_condition_batch = tf.slice(global_condition_batch, [0, 0, 0], [-1, cut_width,-1])
 
-            weights_gc_filter = variables['gc_filtweights']
-            conv_filter = conv_filter + tf.nn.conv1d(global_condition_batch,
+            if self.condition_restriction is None or layer_index<=self.condition_restriction:
+                weights_gc_filter = variables['gc_filtweights']
+                conv_filter = conv_filter + tf.nn.conv1d(global_condition_batch,
                                                     weights_gc_filter,
                                                     stride=1,
                                                     padding="SAME",
                                                     name="gc_filter")
 
-            weights_gc_gate = variables['gc_gateweights']
-            conv_gate = conv_gate + tf.nn.conv1d(global_condition_batch,
+                weights_gc_gate = variables['gc_gateweights']
+                conv_gate = conv_gate + tf.nn.conv1d(global_condition_batch,
                                                  weights_gc_gate,
                                                  stride=1,
                                                  padding="SAME",
@@ -373,7 +385,7 @@ class WaveNetModel(object):
         else:
             out_skip = tf.slice(out, [0, skip_cut, 0], [-1, -1, -1])
         #out_skip_slice = tf.slice(out, [0, tf.abs(skip_cut), 0], [-1, -1, -1])
-        #This is for velocity, but outdated
+        #for velocity, outdated
         #out_skip_pad = tf.image.resize_image_with_crop_or_pad(out, tf.shape(out)[0], output_width)
         #out_skip = tf.cond(tf.less(skip_cut, 0),
                     #lambda: out_skip_pad,
@@ -467,13 +479,14 @@ class WaveNetModel(object):
             global_condition_batch = tf.reshape(global_condition_batch,
                                                 shape=(1, -1))
 
-            weights_gc_filter = variables['gc_filtweights']
-            weights_gc_filter = weights_gc_filter[0, :, :]
-            output_filter += tf.matmul(global_condition_batch,
+            if self.condition_restriction is None or layer_index<=self.condition_restriction:
+                weights_gc_filter = variables['gc_filtweights']
+                weights_gc_filter = weights_gc_filter[0, :, :]
+                output_filter += tf.matmul(global_condition_batch,
                                        weights_gc_filter)
-            weights_gc_gate = variables['gc_gateweights']
-            weights_gc_gate = weights_gc_gate[0, :, :]
-            output_gate += tf.matmul(global_condition_batch,
+                weights_gc_gate = variables['gc_gateweights']
+                weights_gc_gate = weights_gc_gate[0, :, :]
+                output_gate += tf.matmul(global_condition_batch,
                                      weights_gc_gate)
 
         if self.use_biases:
@@ -691,7 +704,19 @@ class WaveNetModel(object):
         :return: Embedding or None
         '''
         embedding = None
-        if self.global_condition_cardinality is not None:
+        if self.chain_vel or self.chain_mel:
+            #[bs, -1, 2]
+            embedding_prod, embedding_cond = tf.split(global_condition, [1, 1], -1)
+            if self.chain_vel:
+                embedding_table_prod = self.variables['embeddings']['gc_vel']
+            else:
+                embedding_table_prod = self.variables['embeddings']['gc_pitch']
+            embedding_table_cond = self.variables['embeddings']['gc_embedding']
+            embedding_prod = tf.nn.embedding_lookup(embedding_table_prod, embedding_prod)
+            embedding_cond = tf.nn.embedding_lookup(embedding_table_cond, embedding_cond)
+            embedding = embedding_prod + embedding_cond
+
+        elif self.global_condition_cardinality is not None:
             # Only lookup the embedding if the global condition is presented
             # as an integer of mutually-exclusive categories ...
             embedding_table = self.variables['embeddings']['gc_embedding']
@@ -700,7 +725,6 @@ class WaveNetModel(object):
         elif global_condition is not None:
             # ... else the global_condition (if any) is already provided
             # as an embedding.
-
             # In this case, the number of global_embedding channels must be
             # equal to the the last dimension of the global_condition tensor.
             gc_batch_rank = len(global_condition.get_shape())
@@ -713,7 +737,7 @@ class WaveNetModel(object):
                                         self.global_condition_channels))
             embedding = global_condition
 
-        if self.load_chord:
+        if self.chain_vel or self.chain_mel or self.load_chord:
             embedding = tf.reshape(
                     embedding, [self.batch_size, -1, self.global_condition_channels])
         elif embedding is not None and not self.load_chord:
@@ -721,6 +745,18 @@ class WaveNetModel(object):
                 embedding,
                 [self.batch_size, 1, self.global_condition_channels])
 
+        return embedding
+
+    def _embed_lc(self, condition, network_input_width):
+        if condition is None:
+            raise ValueError('Condition batch in local condition layer can not be None')
+        out_shape = [self.batch_size, network_input_width, 1 , self.local_condition_channels]
+        embedding = tf.expand_dims(condition, 2)
+        embedding = tf.expand_dims(embedding, 3)
+        local_w = self.variables['embeddings']['lc_embedding']
+        embedding = tf.nn.conv2d_transpose(embedding, local_w, output_shape=tf.stack(out_shape), strides = [1, self.local_upsample_rate, 1, 1], padding='SAME')
+        embedding = tf.reshape(
+                embedding, [self.batch_size, -1, self.local_condition_channels])
         return embedding
 
     def predict_proba(self, waveform, global_condition=None, name='wavenet'):
@@ -742,7 +778,11 @@ class WaveNetModel(object):
                 encoded = self._one_hot(waveform)
             #INPUT??
 
-            gc_embedding = self._embed_gc(global_condition)
+            if self.local_condition_channels:
+                gc_embedding = self._embed_lc(global_condition)
+            else:
+                gc_embedding = self._embed_gc(global_condition)
+
             raw_output = self._create_network(encoded, gc_embedding)
             if self.velocity_input:
                 out = tf.reshape(raw_output, [-1, 2, self.quantization_channels])
@@ -793,7 +833,12 @@ class WaveNetModel(object):
             else:
                 encoded = tf.one_hot(waveform, self.quantization_channels, dtype=tf.float32)
                 encoded = tf.reshape(encoded, [-1, self.quantization_channels])
-            gc_embedding = self._embed_gc(global_condition)
+
+            if self.local_condition_channels:
+                gc_embedding = self._embed_lc(global_condition)
+            else:
+                gc_embedding = self._embed_gc(global_condition)
+
             raw_output = self._create_generator(encoded, gc_embedding)
             if self.velocity_input:
                 out = tf.reshape(raw_output, [-1, 2, self.quantization_channels])
@@ -849,7 +894,12 @@ class WaveNetModel(object):
             else:
                 encoded_input = mu_law_encode(input_batch, self.quantization_channels)
 
-            gc_embedding = self._embed_gc(global_condition_batch)
+            network_input_width = tf.shape(encoded_input)[1] - 1
+            if self.local_condition_channels and global_condition_batch is not None:
+                gc_embedding = self._embed_lc(global_condition_batch, network_input_width)
+            else:
+                gc_embedding = self._embed_gc(global_condition_batch)
+
             encoded = self._one_hot(encoded_input)
             if self.scalar_input:
                 network_input = tf.reshape(
