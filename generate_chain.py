@@ -6,11 +6,9 @@ from datetime import datetime
 import json
 import numpy as np
 import tensorflow as tf
-import pretty_midi
-#import re
 
 from wavenet import WaveNetModel
-from utils import convert_to_mid, load_audio_velocity
+from utils import convert_to_mid, create_midi_seed
 from scipy.stats import entropy
 
 from gpu import define_gpu
@@ -23,8 +21,8 @@ GC_CARDINALITY = 52
 GC_CHANNELS = 64
 CHECKPOINT_MEL = './logdir/Nottingham/train/2018-07-17T00-18-54/model.ckpt-3999'
 CHECKPOINT_VEL = './logdir/Nottingham/train/2018-07-16T23-55-21/model.ckpt-600'
-WAV_SEED = './Nottingham_melody_64_hashed/test_cut_melody/hpps_simple_chords_11.mid'
-MID_OUT_PATH = './Nottingham_melody_64_hashed/generated/test_global-hpps_11.mid'
+WAV_SEED = './Nottingham_melody_64_hashed/test_cut_melody/ashover_simple_chords_5.mid'
+MID_OUT_PATH = './Nottingham_melody_64_hashed/generated/chain_ashover_5.mid'
 
 def get_arguments():
     def _str_to_bool(s):
@@ -54,51 +52,6 @@ def get_arguments():
 
     arguments = parser.parse_args()
     return arguments
-
-def create_midi_seed(filename, sample_rate, window_size, chain_mel=False, chain_vel=False, init=False):
-    pm = pretty_midi.PrettyMIDI(filename)
-    mel_instrument = [pm.instruments[0]]
-    chord_instrument = [pm.instruments[2]]
-    if chain_vel:
-        cont_instrument = [pm.instruments[-1]]
-    pm.instruments = mel_instrument
-    midi = pm.get_piano_roll(fs=sample_rate, times=None)
-    midi = np.swapaxes(midi, 0, 1)
-    midi = np.argmax(midi, axis=-1)
-    midi = np.reshape(midi, (-1, 1))
-    midi = midi.astype(np.float32)
-    last = True if chain_mel and not init else False
-    velocity = load_audio_velocity(filename, sample_rate, last=last)
-    velocity = np.reshape(velocity, (-1, 1))
-    pm.instruments = chord_instrument
-    chords = pm.get_piano_roll(fs=sample_rate, times=None)
-    chords = np.swapaxes(chords, 0, 1)
-    chords = np.argmax(chords, axis=-1)
-    chords = np.reshape(chords, (-1, 1))
-    if chain_mel or chain_vel:
-        samples_num = np.size(chords) - np.size(midi)
-    midi_size = np.size(midi)
-    if init:
-        vel_init = np.asarray([90]*(np.size(chords)-midi_size))
-        vel_init = np.reshape(vel_init, (-1, 1))
-        velocity = np.concatenate((velocity, vel_init), axis=0)
-    #chords = chords[:min_len]
-    cut_index = np.size(midi) if np.size(midi)<window_size else window_size
-    if chain_mel:
-        prod = np.concatenate((midi, velocity[:midi_size], chords[:midi_size]), axis=1)
-        cont_cut_index = min(np.size(chords), np.size(velocity))
-        cond = np.concatenate((velocity[:cont_cut_index], chords[:cont_cut_index]), axis=1)
-        return prod[:cut_index], cond[cut_index: cut_index+samples_num, :], samples_num
-    if chain_vel:
-        pm.instruments = cont_instrument
-        cont_midi = pm.get_piano_roll(fs=sample_rate, times=None)
-        cont_midi = np.swapaxes(cont_midi, 0, 1)
-        cont_midi = np.argmax(cont_midi, axis=-1)
-        cont_midi = np.reshape(cont_midi, (-1, 1))
-        cont_cut_index = min(np.size(chords), np.size(cont_midi))
-        prod = np.concatenate((velocity[:midi_size], midi, chords[:midi_size]), axis=1)
-        cond = np.concatenate((cont_midi[:cont_cut_index], chords[:cont_cut_index]), axis=1)
-        return prod[:cut_index], cond[cut_index: cut_index+samples_num, :], samples_num
 
 def batch_entropy(pk, qk):
     '''pk, qk are list of ndarrays, each is a probability distribution'''
@@ -158,8 +111,8 @@ def generate_func(args, wavenet_params, chain_mel, chain_vel, init_chain):
         feed_path = args.wav_seed
     else:
         feed_path = args.mid_out_path
-    seed, cond_cont, samples_num = create_midi_seed(feed_path, sample_rate,
-            receptive_field, chain_mel=chain_mel, chain_vel=chain_vel, init=init_chain)
+    seed, cond_cont, samples_num = create_midi_seed(filename=feed_path, samples_num=None, sample_rate=sample_rate,
+            window_size=receptive_field, chain_mel=chain_mel, chain_vel=chain_vel, init=init_chain)
 
     waveform = seed.tolist()
     wave_array = np.asarray(waveform)
