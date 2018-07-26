@@ -348,6 +348,5 @@ def main():
                 args.load_velocity, args.chain_mel, args.chain_vel)
     print('Finished generating. The result can be viewed in TensorBoard.')
 
-
 if __name__ == '__main__':
     main()

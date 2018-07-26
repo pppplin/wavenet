@@ -18,11 +18,12 @@ SAMPLES = 16000 #Overwrite in create_midi_seed
 TEMPERATURE = 1.0
 WAVENET_PARAMS = './wavenet_params.json'
 GC_CARDINALITY = 52
-GC_CHANNELS = 64
-CHECKPOINT_MEL = './logdir/Nottingham/train/2018-07-17T00-18-54/model.ckpt-3999'
-CHECKPOINT_VEL = './logdir/Nottingham/train/2018-07-16T23-55-21/model.ckpt-600'
-WAV_SEED = './Nottingham_melody_64_hashed/test_cut_melody/ashover_simple_chords_5.mid'
-MID_OUT_PATH = './Nottingham_melody_64_hashed/generated/chain_ashover_5.mid'
+GC_CHANNELS = 32
+VEL_SET = [0, 80, 95, 105]
+CHECKPOINT_MEL = './logdir/Nottingham/train/2018-07-26T13-21-17/model.ckpt-650'
+CHECKPOINT_VEL = './logdir/Nottingham/train/2018-07-26T11-26-02/model.ckpt-2450'
+WAV_SEED = './Nottingham_melody_64_hashed/test_cut_melody/jigs_simple_chords_149.mid'
+MID_OUT_PATH = './Nottingham_melody_64_hashed/generated/chain_jigs_149.mid'
 
 def get_arguments():
     def _str_to_bool(s):
@@ -65,18 +66,21 @@ def batch_entropy(pk, qk):
     return kl_value
 
 def generate_func(args, wavenet_params, chain_mel, chain_vel, init_chain):
-    global idx, pre_pred, kl_result, variables_to_restore
+    global idx, pre_pred, kl_result, variables_to_restore_mel, variables_to_restore_vel
     cur_pred = []
-
     """Define Session"""
     sess = tf.Session()
+    if chain_mel:
+        quantization_channels = wavenet_params['quantization_channels']
+    else:
+        quantization_channels = wavenet_params['velocity_quantization_channels']
     net = WaveNetModel(
         batch_size=1,
         dilations=wavenet_params['dilations'],
         filter_width=wavenet_params['filter_width'],
         residual_channels=wavenet_params['residual_channels'],
         dilation_channels=wavenet_params['dilation_channels'],
-        quantization_channels=wavenet_params['quantization_channels'],
+        quantization_channels=quantization_channels,
         skip_channels=wavenet_params['skip_channels'],
         midi_input=wavenet_params["midi_input"],
         use_biases=wavenet_params['use_biases'],
@@ -94,30 +98,50 @@ def generate_func(args, wavenet_params, chain_mel, chain_vel, init_chain):
     sess.run(net.init_ops)
 
     #working tf.global_variables() increasing with script all the time!
+
+    """wavenet:chain_mel; wavenet_2:chain_vel"""
     if init_chain:
-        variables_to_restore = {
+        variables_to_restore_mel = {
             var.name[:-2]: var for var in tf.global_variables()
             if not ('state_buffer' in var.name or 'pointer' in var.name)}
-    saver = tf.train.Saver(variables_to_restore)
+    elif idx==1:
+        #init chain_vel
+        variables_to_restore_vel = {
+            var.name[:-2].replace("_2", ""): var for var in tf.global_variables()
+            if not ('state_buffer' in var.name or 'pointer' in var.name) and ('wavenet_2' in var.name)}
+
+    if chain_mel:
+        saver = tf.train.Saver(variables_to_restore_mel)
+    else:
+        saver = tf.train.Saver(variables_to_restore_vel)
+
     print('Restoring model from {}'.format(ckpt))
     saver.restore(sess, ckpt)
     print('Done')
 
     """Import seed"""
-    quantization_channels = wavenet_params['quantization_channels']
     sample_rate = wavenet_params['sample_rate']
     receptive_field = net.receptive_field
-    if init_chain:
-        feed_path = args.wav_seed
-    else:
-        feed_path = args.mid_out_path
-    seed, cond_cont, samples_num = create_midi_seed(filename=feed_path, samples_num=None, sample_rate=sample_rate,
-            window_size=receptive_field, chain_mel=chain_mel, chain_vel=chain_vel, init=init_chain)
 
+    """TODO:"""
+    init_chain = False
+    feed_path = args.mid_out_path
+    #if init_chain:
+    #    feed_path = args.wav_seed
+    #else:
+    #    feed_path = args.mid_out_path
+
+    seed, cond_cont, samples_num = create_midi_seed(
+            filename=feed_path, vel_set=VEL_SET,
+            samples_num=None, sample_rate=sample_rate,
+            window_size=receptive_field, chain_mel=chain_mel,
+            chain_vel=chain_vel, init=init_chain)
     waveform = seed.tolist()
     wave_array = np.asarray(waveform)
-    sample_max = np.max(wave_array[:, 0])
-    sample_min = np.min(wave_array[:, 0])
+    if chain_mel:
+        sample_max = np.max(wave_array[:, 0])
+        temp_arr = wave_array[:, 0]
+        sample_min = np.min(temp_arr[np.nonzero(temp_arr)])
 
     outputs = [next_sample]
     outputs.extend(net.push_ops)
@@ -159,14 +183,21 @@ def generate_func(args, wavenet_params, chain_mel, chain_vel, init_chain):
         if args.temperature == 1.0:
             np.testing.assert_allclose(prediction, scaled_prediction, atol=1e-5,
                     err_msg='Prediction scaling at temperature=1.0 is not working as intended.')
-        sample = np.random.choice(np.arange(quantization_channels), p=scaled_prediction)
 
-        sample = sample_max if sample>sample_max else sample
-        sample = sample_min if sample<sample_min else sample
+        if chain_mel:
+            sample = np.random.choice(np.arange(quantization_channels), p=scaled_prediction)
+            sample = sample_max if sample>sample_max else sample
+            if sample<sample_min:
+                if sample>(sample_min/2):
+                    sample = sample_min
+                else:
+                    sample = 0
+        else:
+            sample = np.random.choice(VEL_SET, p=scaled_prediction)
         try:
             waveform.append([sample, cond_cont[step][0], cond_cont[step][1]])
         except:
-            print(step)
+            print(step, "sample value: ", sample)
         # Show progress only once per second.
         current_sample_timestamp = datetime.now()
         time_since_print = current_sample_timestamp - last_sample_timestamp
@@ -174,16 +205,17 @@ def generate_func(args, wavenet_params, chain_mel, chain_vel, init_chain):
             print('Sample {:3<d}/{:3<d}'.format(step + 1, samples_num),
                   end='\r')
             last_sample_timestamp = current_sample_timestamp
-
     """Write to file"""
     if args.mid_out_path:
         out = np.reshape(waveform, (-1, 3))[:, :2]
         op = args.wav_seed if init_chain else args.mid_out_path
-        convert_to_mid(out, sample_rate, filename=args.mid_out_path, op=op, chain_mel=chain_mel, chain_vel=chain_vel)
+        convert_to_mid(out, sample_rate, filename=args.mid_out_path, op=op,
+                vel_set=VEL_SET, chain_mel=chain_mel, chain_vel=chain_vel)
 
-    if chain_mel and not init_chain:
-        kl_result.append(batch_entropy(pre_pred, cur_pred))
-        pre_pred = cur_pred
+    """TODO:"""
+    #if chain_mel and not init_chain:
+    #    kl_result.append(batch_entropy(pre_pred, cur_pred))
+    #    pre_pred = cur_pred
     sess.close()
     print('Finished generating.')
 
