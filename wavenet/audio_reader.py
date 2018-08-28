@@ -79,18 +79,19 @@ def load_generic_audio(directory, sample_rate, lc_enabled=False, load_velocity=F
         midi = np.reshape(midi, (-1, 1))
         velocity = load_audio_velocity(filename, sample_rate)
         velocity = np.reshape(velocity, (-1, 1))
-        if not lc_enabled:
+        if not lc_enabled and load_chord:
             cut_length = min(midi.shape[0], velocity.shape[0], chord.shape[0])
             midi = midi[:cut_length, :]
             velocity = velocity[:cut_length, :]
             chord = chord[:cut_length, :]
-        else:
+        elif lc_enabled:
             rate = sample_rate/local_sample_rate
             cut_length = min(midi.shape[0], category_id.shape[0]*rate)
             midi = midi[:cut_length, :]
             cut_length = cut_length/rate
             chord = chord[:cut_length, :]
-
+        else:
+            pass
         if load_velocity:
             prod = np.concatenate((midi, velocity), axis=1)
             yield prod, filename, category_id
@@ -99,7 +100,11 @@ def load_generic_audio(directory, sample_rate, lc_enabled=False, load_velocity=F
             yield midi, filename, cond
         elif chain_vel:
             cond = np.concatenate((midi, chord), axis=1)
-            yield velocity, filename, cond
+            velocity_hashed = velocity
+            velocity_hashed[velocity_hashed==80] = 1
+            velocity_hashed[velocity_hashed==95] = 2
+            velocity_hashed[velocity_hashed==105] = 3
+            yield velocity_hashed, filename, cond
         elif load_velocity and load_chord:
             raise ValueError("Does not support velocity and chord")
         elif load_chord:
@@ -107,13 +112,13 @@ def load_generic_audio(directory, sample_rate, lc_enabled=False, load_velocity=F
         else:
             yield midi, filename, category_id
 
-def load_audio_velocity(filename, sample_rate, chain_vel=False):
+def load_audio_velocity(filename, sample_rate, last=False):
     """
     filename: must be midi
     return: nd array (, 1), same shape as piano_roll, serves as input
     """
     pm = pretty_midi.PrettyMIDI(filename)
-    if chain_vel:
+    if last:
         melody_instrument = pm.instruments[-1]
     else:
         melody_instrument = pm.instruments[0]
@@ -124,8 +129,9 @@ def load_audio_velocity(filename, sample_rate, chain_vel=False):
     fs = 1.0/sample_rate
     for n in notes:
         start_idx = int(n.start/fs)
-        end_idx = int(n.end/fs)
-        velocity[start_idx: end_idx, 0] = n.velocity
+        #end_idx = int(n.end/fs)
+        #not lasting!!!
+        velocity[start_idx, 0] = n.velocity
     return velocity
 
 def trim_silence(audio, threshold, frame_length=2048):
@@ -259,11 +265,19 @@ class AudioReader(object):
                               "threshold, or adjust volume of the audio."
                               .format(filename))
                 #velocity included and padded
-                audio = np.pad(audio, [[self.receptive_field, 0], [0, 0]],
-                               'constant')
+                if self.sample_size is None:
+                    raise ValueError("Sample size must not be None!, but\
+                            ? can accept varying size")
+
+                #audio = np.pad(audio, [[self.receptive_field, 0], [0, 0]], 'constant')
+                pad = False
+                if len(audio)<(self.receptive_field+self.sample_size):
+                    pad=True
+                    pad_size = self.receptive_field+self.sample_size-len(audio)
+                    audio = np.pad(audio, [[pad_size, 0], [0, 0]], 'wrap')
                 #chord padding
-                if self.load_chord or self.chain_mel or self.chain_vel:
-                    category_id = np.pad(category_id, [[self.receptive_field, 0], [0, 0]], 'constant')
+                if (self.load_chord or self.chain_mel or self.chain_vel) and pad:
+                    category_id = np.pad(category_id, [[pad_size, 0], [0, 0]], 'wrap')
 
                 if self.sample_size:
                     # Cut samples into pieces of size receptive_field +
@@ -273,12 +287,15 @@ class AudioReader(object):
                                         self.sample_size), :]
                         sess.run(self.enqueue,
                                  feed_dict={self.sample_placeholder: piece})
-                        audio = audio[self.sample_size:, :]
+                        #samples without overlap
+                        #cut_size = self.sample_size/4
+                        cut_size = self.sample_size
+                        audio = audio[cut_size:, :]
                         if self.chain_mel or self.chain_mel or self.load_chord:
                             category_id_piece = category_id[:(self.receptive_field+self.sample_size), :]
                             sess.run(self.gc_enqueue, feed_dict={
                                 self.id_placeholder: category_id_piece})
-                            category_id = category_id[self.sample_size:, :]
+                            category_id = category_id[cut_size:, :]
                         elif self.gc_enabled:
                             sess.run(self.gc_enqueue, feed_dict={self.id_placeholder: category_id})
 

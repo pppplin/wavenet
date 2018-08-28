@@ -26,8 +26,8 @@ BATCH_SIZE = 2 #1
 DATA_DIRECTORY = './VCTK-Corpus/wav48/p225'
 LOGDIR_ROOT = './logdir'
 CHECKPOINT_EVERY = 50
-NUM_STEPS = int(4000)
-LEARNING_RATE = 1e-5 #1e-3
+NUM_STEPS = int(11000)
+LEARNING_RATE = 1e-6 #1e-3
 WAVENET_PARAMS = './wavenet_params.json'
 STARTED_DATESTRING = "{0:%Y-%m-%dT%H-%M-%S}".format(datetime.now())
 SAMPLE_SIZE = 80000 #100k
@@ -134,6 +134,8 @@ def load(saver, sess, logdir):
           end="")
 
     ckpt = tf.train.get_checkpoint_state(logdir)
+    #saver.restore(sess, "./logdir/Nottingham/train/2018-08-13T18-52-50/model.ckpt-5100")
+    #return 5800
     if ckpt:
         print("  Checkpoint found: {}".format(ckpt.model_checkpoint_path))
         global_step = int(ckpt.model_checkpoint_path
@@ -141,7 +143,7 @@ def load(saver, sess, logdir):
                           .split('-')[-1])
         print("  Global step was: {}".format(global_step))
         print("  Restoring...", end="")
-        #saver.restore(sess, "./logdir/jazz/train/2018-05-09T17-24-20/model.ckpt-1400")
+        #saver.restore(sess, "./logdir/Nottingham/train/2018-08-14T17-31-06/model.ckpt-5366")
         saver.restore(sess, ckpt.model_checkpoint_path)
         print(" Done.")
         return global_step
@@ -252,6 +254,9 @@ def main():
             gc_id_batch = None
 
     local_upsample_rate = wavenet_params["sample_rate"]/wavenet_params["local_sample_rate"]
+    quantization_channels = wavenet_params["quantization_channels"]
+    if args.chain_vel:
+        quantization_channels = wavenet_params["velocity_quantization_channels"]
     # Create network.
     net = WaveNetModel(
         batch_size=args.batch_size,
@@ -260,7 +265,7 @@ def main():
         residual_channels=wavenet_params["residual_channels"],
         dilation_channels=wavenet_params["dilation_channels"],
         skip_channels=wavenet_params["skip_channels"],
-        quantization_channels=wavenet_params["quantization_channels"],
+        quantization_channels=quantization_channels,
         use_biases=wavenet_params["use_biases"],
         scalar_input=wavenet_params["scalar_input"],
         velocity_input=args.load_velocity,
@@ -320,7 +325,7 @@ def main():
 
     step = None
     last_saved_step = saved_global_step
-    total_loss = 0
+    #total_loss = 0
     try:
         for step in range(saved_global_step + 1, args.num_steps):
             start_time = time.time()
@@ -345,7 +350,7 @@ def main():
                 writer.add_summary(summary, step)
 
             duration = time.time() - start_time
-            total_loss += loss_value
+            #total_loss += loss_value
             print('step {:d} - loss = {:.3f}, ({:.3f} sec/step)'
                   .format(step, loss_value, duration))
 

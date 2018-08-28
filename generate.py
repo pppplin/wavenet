@@ -20,7 +20,7 @@ LOGDIR = './logdir/train/2017-11-03T10-40-54/model.ckpt-1400'
 WAVENET_PARAMS = './wavenet_params.json'
 SAVE_EVERY = None
 SILENCE_THRESHOLD = 0 #0.1
-
+VEL_SET = [0, 80, 95, 105]
 
 def get_arguments():
     def _str_to_bool(s):
@@ -134,7 +134,8 @@ def main():
         wavenet_params = json.load(config_file)
 
     sess = tf.Session()
-    local_upsample_rate = wavenet_params["sample_rate"]/wavenet_params["local_sample_rate"]
+    #local_upsample_rate = wavenet_params["sample_rate"]/wavenet_params["local_sample_rate"]
+    local_upsample_rate = None
     net = WaveNetModel(
         batch_size=1,
         dilations=wavenet_params['dilations'],
@@ -195,37 +196,45 @@ def main():
                             quantization_channels,
                             net.receptive_field)
         elif args.load_chord or args.chain_mel or args.chain_vel:
-            seed, cond_cont = create_midi_seed(args.wav_seed, args.samples,
-                    wavenet_params['sample_rate'], quantization_channels,
-                    net.receptive_field, use_velocity=args.load_velocity,
-                    use_chord=args.load_chord, chain_mel=args.chain_mel, chain_vel=args.chain_vel, init=args.init_chain)
+            seed, cond_cont = create_midi_seed(
+                    filename=args.wav_seed,
+                    samples_num=args.samples,
+                    sample_rate=wavenet_params['sample_rate'],
+                    window_size=net.receptive_field,
+                    use_velocity=args.load_velocity,
+                    use_chord=args.load_chord, chain_mel=args.chain_mel,
+                    chain_vel=args.chain_vel, init=args.init_chain)
         elif local_upsample_rate:
             raise ValueError("Not implemented yet")
             #TODO add a local variable, dont use sample rate
         else:
-            raise ValueError("Not implemented yet")
+            #raise ValueError("Not implemented yet")
             seed = create_midi_seed(args.wav_seed,
-                            args.samples,
-                            wavenet_params['sample_rate'],
-                            quantization_channels,
-                            net.receptive_field,
-                            velocity = args.load_velocity,
-                            chord = args.load_chord)
+                            samples_num=args.samples,
+                            sample_rate=wavenet_params['sample_rate'],
+                            window_size=net.receptive_field,
+                            use_velocity = False,
+                            use_chord = False)
 
         waveform = sess.run(seed).tolist()
+        print(waveform)
         if args.load_velocity:
             wave_array = np.asarray(waveform)
             sample_max = np.max(wave_array[:, 0])
-            sample_min = np.min(wave_array[:, 0])
+            temp_arr = wave_array[:, 0]
+            sample_min = np.min(temp_arr[np.nonzero(temp_arr)])
             velocity_max = np.max(wave_array[:, 1])
-            velocity_min = np.min(wave_array[:, 1])
+            temp_arr = wave_array[:, 1]
+            velocity_min = np.min(temp_arr[np.nonzero(temp_arr)])
         elif args.load_chord or args.chain_mel or args.chain_vel:
             wave_array = np.asarray(waveform)
             sample_max = np.max(wave_array[:, 0])
-            sample_min = np.min(wave_array[:, 0])
+            temp_arr = wave_array[:, 0]
+            sample_min = np.min(temp_arr[np.nonzero(temp_arr)])
         else:
             sample_max = max(waveform)
-            sample_min = min(waveform)
+            temp_arr = np.asarray(waveform)
+            sample_min = np.min(temp_arr[np.nonzero(temp_arr)])
     else:
         # Silence with a single random sample at the end.
         waveform = [quantization_channels / 2] * (net.receptive_field - 1)
@@ -240,7 +249,6 @@ def main():
         # used to fill the queues initially.
         outputs = [next_sample]
         outputs.extend(net.push_ops)
-
         print('Priming generation...')
         for i, x in enumerate(waveform[-net.receptive_field: -1]):
             if args.load_velocity or args.load_chord:
@@ -249,13 +257,18 @@ def main():
             elif args.chain_mel or args.chain_vel:
                 x = np.asarray(x)
                 x = np.reshape(x, (-1, 3))
+            else:
+                x = np.asarray(x)
+                x = np.reshape(x, (-1, 1))
             if i % 100 == 0:
                 print('Priming sample {}'.format(i))
-            if args.load_chord or args.chain_mel or args.chain_vel:
+            if args.chain_mel or args.chain_vel:
                 #load global condition from waveform
                 sess.run(outputs, feed_dict={samples: x[:, 0], global_cond: x[:, 1:]})
+            elif args.load_chord:
+                sess.run(outputs, feed_dict={samples: x[:, 0], global_cond: x[:, 1]})
             else:
-                sess.run(outputs, feed_dict={samples: x})
+                sess.run(outputs, feed_dict={samples: x[:, 0]})
         print('Done.')
 
     last_sample_timestamp = datetime.now()
@@ -274,8 +287,10 @@ def main():
             outputs = [next_sample]
 
         # Run the WaveNet to predict the next sample.
-        if args.load_chord or args.chain_mel or args.chain_vel:
+        if args.chain_mel or args.chain_vel:
             prediction = sess.run(outputs, feed_dict={samples: window[0], global_cond: window[1:]})[0]
+        elif args.load_chord:
+            prediction = sess.run(outputs, feed_dict={samples: window[0], global_cond: window[1]})[0]
         else:
             prediction = sess.run(outputs, feed_dict={samples: window})[0]
 
@@ -303,11 +318,17 @@ def main():
             sample = np.random.choice(np.arange(quantization_channels), p=scaled_prediction)
 
         sample = sample_max if sample>sample_max else sample
-        sample = sample_min if sample<sample_min else sample
+        if sample<sample_min:
+            if sample<(sample_min/2):
+                sample = 0
+            else:
+                sample = sample_min
         if not (args.load_velocity or args.load_chord or args.chain_mel or args.chain_vel):
             waveform.append(sample)
-        elif args.wav_seed and (args.load_chord or args.chain_mel or args.chain_vel):
+        elif args.wav_seed and (args.chain_mel or args.chain_vel):
             waveform.append([sample, cond_cont[step][0], cond_cont[step][1]])
+        elif args.wav_seed and args.load_chord:
+            waveform.append([sample, cond_cont[step][0]])
         elif args.load_velocity:
             #TODO ONLY FOR TESTING
             if sample_melody>=sample_min and sample_melody<=sample_max \
@@ -340,12 +361,15 @@ def main():
         elif args.load_chord:
             out = np.reshape(waveform, (-1, 2))
             out = np.reshape(out[:, 0], (-1, 1))
+            print(out[-100:, :])
         elif args.chain_mel or args.chain_vel:
             out = np.reshape(waveform, (-1, 3))[:, :2]
         else:
             out = np.reshape(waveform, (-1, 1))
-        convert_to_mid(out, sample_rate, args.mid_out_path, args.wav_seed,
-                args.load_velocity, args.chain_mel, args.chain_vel)
+        convert_to_mid(array=out, sample_rate=wavenet_params['sample_rate'],
+                filename=args.mid_out_path, op=args.wav_seed,
+                velocity=args.load_velocity,
+                chain_mel=args.chain_mel, chain_vel=args.chain_vel)
     print('Finished generating. The result can be viewed in TensorBoard.')
 
 if __name__ == '__main__':
