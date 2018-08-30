@@ -217,7 +217,6 @@ def main():
                             use_chord = False)
 
         waveform = sess.run(seed).tolist()
-        print(waveform)
         if args.load_velocity:
             wave_array = np.asarray(waveform)
             sample_max = np.max(wave_array[:, 0])
@@ -274,6 +273,8 @@ def main():
     last_sample_timestamp = datetime.now()
     #TODO chain
     """Generation"""
+    if args.wav_seed and not (args.load_velocity or args.load_chord or args.chain_mel or args.chain_vel):
+        waveform = [i[0] for i in waveform]
     for step in range(args.samples):
         if args.fast_generation:
             outputs = [next_sample]
@@ -365,6 +366,15 @@ def main():
         elif args.chain_mel or args.chain_vel:
             out = np.reshape(waveform, (-1, 3))[:, :2]
         else:
+            #nc
+            print(waveform)
+            _waveform = []
+            for i in waveform:
+                if isinstance(i, list):
+                    _waveform.append(i[0])
+                else:
+                    _waveform.append(i)
+            waveform = _waveform
             out = np.reshape(waveform, (-1, 1))
         convert_to_mid(array=out, sample_rate=wavenet_params['sample_rate'],
                 filename=args.mid_out_path, op=args.wav_seed,

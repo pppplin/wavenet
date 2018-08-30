@@ -31,7 +31,7 @@ def array_to_pretty_midi(array, fs=100, velocity=90, program=68, op=None):
     ts = 0
     te = 1/fs
     p = array[0]
-    print(array, p)
+    #print(array, p)
     for i in range(n-1):
         if array[i+1]!=array[i] and p!=0:
             pm_note = pretty_midi.Note(
