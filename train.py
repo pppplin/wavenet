@@ -22,12 +22,12 @@ from wavenet import WaveNetModel, AudioReader, optimizer_factory
 from gpu import define_gpu
 define_gpu(2)
 
-BATCH_SIZE = 2 #1
+BATCH_SIZE = 32 #1
 DATA_DIRECTORY = './VCTK-Corpus/wav48/p225'
 LOGDIR_ROOT = './logdir'
 CHECKPOINT_EVERY = 50
-NUM_STEPS = int(11000)
-LEARNING_RATE = 1e-6 #1e-3
+NUM_STEPS = int(500)
+LEARNING_RATE = 1e-3 #1e-3
 WAVENET_PARAMS = './wavenet_params.json'
 STARTED_DATESTRING = "{0:%Y-%m-%dT%H-%M-%S}".format(datetime.now())
 SAMPLE_SIZE = 80000 #100k

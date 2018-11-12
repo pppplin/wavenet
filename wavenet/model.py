@@ -984,7 +984,7 @@ class WaveNetModel(object):
                 network_input = tf.slice(network_input, [0, 0, 0],
                                      [-1, network_input_width, -1])
 
-            if gc_embedding:
+            if gc_embedding is not None:
                 gc_embedding = tf.slice(gc_embedding, [0, 0, 0], [-1, network_input_width, -1])
             if self.chain_mel and self.condition_restriction is not None:
                 vel_embedding = tf.slice(vel_embedding, [0, 0, 0], [-1, network_input_width, -1])
