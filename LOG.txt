@@ -1,0 +1,53 @@
+2.6 Tues
+This is the branch without local condition. The dataset is melody_matrix midi.
+Train and test seperation 非常草率，就取了前几个..
+preprocess:
+madmom.utils.midi.process_notes 并不知道为什么出来是 时间*5？？？？而不是*128 因为出来的是note傻鹅!!!!.. local condition也要改..
+
+2.7 Wed
+train:
+python train.py --data_dir./data_train  --log_dir_root ./logdir --batchsize32 --silence 0
+find_files(directory, pattern='*.mid')
+
+2.8 Thur
+generate revise for mid
+python generate.py --samples 40 --first one
+
+2.22 Thur
+not working: non-fast generation, mu law encode/decode, quantization_channels, also audio summary, also temperature thing!
+non-fast generation not working ..
+quantization_channels? 128 or 256??
+encode, decode not needed? not working for midi
+1. save midi work ok
+2. data process一堆去掉 not yet, but current ver working
+3. 4-->8/16 and also sec长一些
+
+experiment: 8, 128
+
+2.28 Wed
+1. finish array_to_pretty_midi
+2. generate scale down and rescale??? no!!!!!!! I think crop is fine!!!!!
+python train.py --data_dir ./Bach_Bwv/Bach_Bwv_train/ --logdir_root ./logdir/Bach_Bwv/ --batch_size 32 --silence_threshold 0
+
+#crop while generate, and longer sample(60s maybe?)
+3.12 Mon
+1. --batch_size 16 --sample_size 8000(500s if samplerate=16, think is fine)
+2. files length 700 originally, cut to 500
+3.manually validation/early stop sometime: https://www.quora.com/How-does-one-employ-early-stopping-in-TensorFlow:
+already seperate validation set + have an argument
+
+3.13 Tues
+cpu有问题????
+try generate samples, waveseed, mid_out_path, sample_rate 8
+also cut midi file and try again
+also does the outpout of last timestep feed as input?
+
+3.14 Wed
+1. fast generation works. non fast?
+2. right now the only normalization is to cut the range(min/max)
+
+3.15 Thur
+1. train on MELODY-MIDI data
+
+3.16 Fri
+1. fix instrument!!!
